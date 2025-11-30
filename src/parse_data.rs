@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     io::{self, Read, Write},
-    // sync::mpsc,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -10,6 +10,7 @@ use serialport::{DataBits, FlowControl, Parity, StopBits};
 use crate::csv_utils;
 //use crate::esp_port;
 use crate::csi_packet;
+use crate::detect_motion;
 //use crate::app;
 
 pub fn parse_csi_line(line: &str) -> Option<csi_packet::CsiPacket> {
@@ -101,6 +102,7 @@ pub fn record_csi_to_file(
     csv_filename: &str,
     rrd_filename: &str,
     seconds: u64,
+    // plot_rx: mpsc::Send<(f64, f64)>
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize Rerun recording stream
     let rec = rerun::RecordingStreamBuilder::new("esp-csi-tui-rs")
@@ -161,6 +163,15 @@ pub fn record_csi_to_file(
                         }
                     }
                 }
+                // if let Some(amp) = detec_motion::amplitude_for_subcarrier(packet, SUBCARRIER) {
+                //     let t = if first_ts.is_none() {
+                //         first_ts = Some(packet.esp_timestamp);
+                //         0.0
+                //     } else {
+                //         detec_motion::time_in_seconds(first_ts.unwrap(), &packet)
+                //     };
+                //     let _ = plot_tx.send((t, amp));
+                // }
             }
             Ok(_) => {
                 // No data read, continue

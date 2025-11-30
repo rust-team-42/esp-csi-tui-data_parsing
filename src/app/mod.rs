@@ -8,13 +8,14 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::{
     style::Stylize,
     text::{Line, Text},
-    widgets::{Block, Paragraph},
+    widgets::{Block, Paragraph, Chart, Axis, Dataset, GraphType},
+    layout::{Layout, Constraint, Direction},
+    style::Color,
     DefaultTerminal, Frame,
 };
-//use crate::csv_utils;
 use crate::esp_port;
-//use crate::csi_packet;
 use crate::parse_data;
+use crate::read_data;
 
 #[derive(Debug)]
 struct RecordingStats {
@@ -26,6 +27,7 @@ struct RecordingStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     EnterFilename,
+    ChooseAction,
     EnterDuration,
     Recording,
     Finished,
@@ -34,26 +36,24 @@ enum Step {
 /// The main application which holds the state and logic of the application.
 #[derive(Debug)]
 pub struct App {
-    /// Is the application running?
-    running: bool,
-    /// Current UI / recording step.
-    step: Step,
-    /// Detected serial port (e.g. "/dev/ttyACM0").
-    detected_port: Option<String>,
-    /// Filename the user types (e.g. "walk1").
-    filename: String,
-    /// Duration in seconds (typed as text, e.g. "10").
-    duration_input: String,
-    /// Status message to show at bottom.
-    status: String,
+    running: bool, /// Is the application running?
+    step: Step, /// Current UI / recording step.
+    detected_port: Option<String>, /// Detected serial port (e.g. "/dev/ttyACM0").
+    filename: String, /// Filename the user types (e.g. "walk1").
+    duration_input: String, /// Duration in seconds (typed as text, e.g. "10").
+    status: String, /// Status message to show at bottom.
     /// Channel to receive completion message from worker thread.
     worker_done_rx: Option<mpsc::Receiver<std::result::Result<(), String>>>,
+    plot_points: Vec<(f64, f64)>,
+    //first_ts: Option<u64>,
+    subcarrier: usize,
+    plot_rx: Option<mpsc::Receiver<(f64, f64)>>,
 }
 
 impl Default for App {
     fn default() -> Self {
         let detected_port = esp_port::find_esp_port();
-        let mut status = match &detected_port {
+        let status = match &detected_port {
             Some(p) => format!("Detected port: {p}. Type filename (without extension) and press Enter."),
             None => "No ESP port detected. Type filename anyway, then duration.".to_string(),
         };
@@ -65,6 +65,9 @@ impl Default for App {
             duration_input: String::new(),
             status,
             worker_done_rx: None,
+            plot_points: Vec::new(),
+            subcarrier: 20,
+            plot_rx: None,
         }
     }
 }
@@ -117,25 +120,97 @@ impl App {
             "Duration (seconds): {}",
             self.duration_input
         ))]);
-
         text.extend([Line::from("")]);
-
         // Instructions based on step
         let help_line = match self.step {
             Step::EnterFilename => "Type filename (without .csv/.rrd) and press Enter.",
+            Step::ChooseAction => "Press R to record new data, or O to open existing .csv file.",
             Step::EnterDuration => "Type duration in seconds and press Enter.",
             Step::Recording => "Recording... press q/Esc to quit early.",
             Step::Finished => "Finished. Press q/Esc to quit.",
         };
         text.extend([Line::from(help_line)]);
-
         text.extend([Line::from("")]);
         text.extend([Line::from(format!("Status: {}", self.status))]);
-
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(10),
+            ])
+            .split(area);
+        let text_area = chunks[0];
+        let chart_area = chunks[1];
         frame.render_widget(
             Paragraph::new(text).block(Block::bordered().title(title)),
-            area,
+            text_area,
         );
+        if !self.plot_points.is_empty() {
+            let (t_min, t_max) = self
+                .plot_points
+                .iter()
+                .fold((0.0f64, 0.0f64), |(mn, mx), (_, a)| {
+                    (mn.min(*a as f64), mx.max(*a as f64))
+                });
+            let dataset = Dataset::default()
+                .name(format!("Subcarrier {}", self.subcarrier))
+                .marker(ratatui::symbols::Marker::Braille)
+                .graph_type(GraphType::Line)
+                .style(Color::Cyan)
+                .data(&self.plot_points);
+            let chart = Chart::new(vec![dataset])
+                .block(Block::bordered().title("Amplitude over time"))
+                .x_axis(
+                    Axis::default()
+                        .title("time (s)")
+                        .bounds([t_min, t_max.max(t_min + 0.1)]),
+                )
+                .y_axis(
+                    Axis::default()
+                        .title("amplitude")
+                        .bounds([0.0, t_max.max(1.0)]),
+                );
+            frame.render_widget(chart, chart_area);
+        }
+        // frame.render_widget(
+        //     Paragraph::new(text).block(Block::bordered().title(title)),
+        //     area,
+        // );
+
+        // let chart_area = chunks[1];
+        // if !self.plot_points.is_empty() {
+        //     let (t_min, t_max) = self
+        //         .plot_points
+        //         .iter()
+        //         .fold((f64::INFINITY, f64::NEG_INFINITY),| (mn, mx), (t, _)| {
+        //             (mn.min(*t), mx.max(*t))
+        //         });
+        //     let (_, a_max) = self
+        //         .plot_points
+        //         .iter()
+        //         .fold((0.0f64, 0.0f64), |(mn, mx), (_, a)| {
+        //             (mn.min(*a as f64), mx.max(*a as f64))
+        //         });
+        //     let dataset = Dataset::default()
+        //         .name(format!("Subcarrier {}", self.subcarrier))
+        //         .marker(ratatui::symbols::Marker::Dot)
+        //         .graph_type(GraphType::Line)
+        //         .style(Color::Cyan)
+        //         .data(&self.plot_points);
+        //     let chart = Chart::new(vec![dataset])
+        //         .block(Block::bordered().title("Amplitude over time per subcarrier"))
+        //         .x_axis(
+        //             Axis::default()
+        //                 .title("time (s)")
+        //                 .bounds([t_min, t_max.max(t_min + 0.1)]),
+        //         )
+        //         .y_axis(
+        //             Axis::default()
+        //                 .title("amplitude")
+        //                 .bounds([0.0, a_max.max(1.0)]),
+
+        //         );
+        // }
     }
 
     /// Reads the crossterm events and updates the state of [`App`].
@@ -165,6 +240,7 @@ impl App {
 
         match self.step {
             Step::EnterFilename => self.handle_filename_input(key),
+            Step::ChooseAction => self.handle_duration_input(key),
             Step::EnterDuration => self.handle_duration_input(key),
             Step::Recording | Step::Finished => {
                 // No extra handling here, q/Esc handled above.
@@ -184,8 +260,9 @@ impl App {
                 if self.filename.is_empty() {
                     self.status = "Filename cannot be empty.".into();
                 } else {
-                    self.step = Step::EnterDuration;
-                    self.status = "Now type duration in seconds and press Enter.".into();
+                    self.step = Step::ChooseAction;
+                    self.status = "Press R to record new data, or O to open existing .csv file".into();
+                    self.load_file_for_plot();
                 }
             }
             _ => {}
@@ -228,6 +305,10 @@ impl App {
         let base_filename = self.filename.clone();
         let csv_filename = format!("{}.csv", base_filename);
         let rrd_filename = format!("{}.rrd", base_filename);
+        // let (done_tx, done_rx) = mpsc::channel::<Result<(), String>>();
+        // let (plot_tx, plot_rx) = mpsc::channel::<(f64, f64)>();
+        // self.worker_done_rx = Some(done_rx);
+        // self.plot_rx = Some(plot_rx);
 
         self.status = format!(
             "Recording to {}.csv and {}.rrd for {}s on port {}...",
@@ -240,7 +321,8 @@ impl App {
 
         // Spawn worker thread that does the blocking I/O.
         thread::spawn(move || {
-            let res = parse_data::record_csi_to_file(&port, &csv_filename, &rrd_filename, secs)
+            let res = parse_data::record_csi_to_file(&port, &csv_filename, 
+                    &rrd_filename, secs)
                 .map_err(|e| e.to_string());
             let _ = tx.send(res);
         });
@@ -269,6 +351,47 @@ impl App {
                     self.step = Step::Finished;
                     self.worker_done_rx = None;
                 }
+            }
+        }
+    }
+
+    // fn poll_plot_data(&mut self) {
+    //     if let Some(rx) = &self.plot_rx {
+    //         while let Ok(point) = rx.try_recv() {
+    //             self.plot_points.push(point);
+    //             if self.plot_points.len() > 500 {
+    //                 let drop = self.plot_points.len() - 500;
+    //                 self.plot_points.drain(0..drop);
+    //             }
+    //         }
+    //     }
+    // }
+
+    fn load_file_for_plot(&mut self) {
+        let filename = self.filename.trim();
+        if filename.is_empty() {
+            self.status = "Filename cannot be empty.".into();
+            return;
+        }
+        let path = format!("{filename}.csv");
+        match read_data::load_csv_amplitude_series(&path, self.subcarrier)
+        {
+            Ok(points) => {
+                if points.is_empty() {
+                    self.status = format!("File {} loaded but contained no valid data.", path);
+                } else {
+                    self.plot_points = points;
+                    self.status = format!(
+                        "Loaded {} samples from {} (subcarrier {}).",
+                        self.plot_points.len(),
+                        path,
+                        self.subcarrier
+                    );
+                }
+                self.step = Step::Finished;
+            }
+            Err(e) => {
+                self.status = format!("Failed to load {}: {}", path, e);
             }
         }
     }

@@ -1,11 +1,13 @@
 
 use color_eyre::Result;
 
-pub mod csi_packet;
-pub mod csv_utils;
-pub mod esp_port;
-pub mod parse_data;
 pub mod app;
+pub mod esp_port;
+pub mod csv_utils;
+pub mod csi_packet;
+pub mod parse_data;
+pub mod detect_motion;
+pub mod read_data;
 
 /// Entry point: initialize terminal + run app.
 fn main() -> Result<()> {
