@@ -14,7 +14,18 @@ use ratatui::{
     widgets::{Block, Paragraph},
     DefaultTerminal, Frame,
 };
+
 use serialport::{SerialPortType, DataBits, FlowControl, Parity, StopBits};
+
+pub mod csi_packet;
+pub mod csv_utils;
+pub mod esp_port;
+
+#[derive(Debug)]
+struct RecordingStats {
+    lines_written: u64,
+    frames_logged: u64,
+}
 
 /// Which step of input / recording we are in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +57,7 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
-        let detected_port = find_esp_port();
+        let detected_port = esp_port::find_esp_port();
         let status = match &detected_port {
             Some(p) => format!("Detected port: {p}. Type filename (without extension) and press Enter."),
             None => "No ESP port detected. Type filename anyway, then duration.".to_string(),
@@ -272,141 +283,143 @@ impl App {
     }
 }
 
-fn find_esp_port() -> Option<String> {
-    let ports = serialport::available_ports().ok()?;
-
-    // First pass: look for USB ports that look like ESP.
-    for p in &ports {
-        if let SerialPortType::UsbPort(usb) = &p.port_type {
-            let product = usb.product.as_deref().unwrap_or("").to_lowercase();
-            let manufacturer = usb.manufacturer.as_deref().unwrap_or("").to_lowercase();
-            if product.contains("esp") || manufacturer.contains("espressif") {
-                return Some(p.port_name.clone());
-            }
-        }
-    }
-
-    // Second pass: pick first ttyACM or ttyUSB as a reasonable default on Linux.
-    ports
-        .into_iter()
-        .map(|p| p.port_name)
-        .find(|name| name.contains("ttyACM") || name.contains("ttyUSB"))
-}
-
 /// Parse a CSI data line and extract subcarrier values.
 /// This version is more lenient - it will try to extract any numeric values from the line.
-fn parse_csi_line(line: &str) -> Option<(u64, Vec<f32>)> {
-    // Try to find numeric values in the line
-    // First, let's handle common CSI formats
+// fn parse_csi_line(line: &str) -> Option<(u64, Vec<f32>)> {
+//     // Try to find numeric values in the line
+//     // First, let's handle common CSI formats
     
-    // If line contains "CSI_DATA" or similar marker
-    let working_line = if let Some(idx) = line.find("csi") {
-        &line[idx..]
+//     // If line contains "CSI_DATA" or similar marker
+//     let working_line = if let Some(idx) = line.find("csi") {
+//         &line[idx..]
+//     } else {
+//         line
+//     };
+
+//     let parts: Vec<&str> = working_line.split(|c| c == ',' || c == ' ' || c == '\t')
+//         .filter(|s| !s.is_empty())
+//         .collect();
+    
+//     if parts.is_empty() {
+//         return None;
+//     }
+
+//     // Try to find a timestamp (first parseable u64)
+//     let mut timestamp: u64 = 0;
+//     let mut csi_start_idx = 0;
+    
+//     for (i, part) in parts.iter().enumerate() {
+//         if let Ok(ts) = part.trim().parse::<u64>() {
+//             timestamp = ts;
+//             csi_start_idx = i + 1;
+//             break;
+//         }
+//     }
+
+//     // Parse remaining values as CSI data
+//     let values: Vec<f32> = parts[csi_start_idx..]
+//         .iter()
+//         .filter_map(|s| {
+//             let trimmed = s.trim();
+//             // Try parsing as i32 first (CSI values are often signed integers)
+//             if let Ok(v) = trimmed.parse::<i32>() {
+//                 return Some(v as f32);
+//             }
+//             // Try parsing as f32
+//             if let Ok(v) = trimmed.parse::<f32>() {
+//                 return Some(v);
+//             }
+//             None
+//         })
+//         .collect();
+
+//     if values.is_empty() {
+//         return None;
+//     }
+
+//     Some((timestamp, values))
+// }
+
+fn parse_csi_line(line: &str) -> Option<csi_packet::CsiPacket> {
+    let trimmed = line.trim();
+
+    let data_part = if trimmed.to_lowercase().starts_with("csi") {
+        let after_csi = trimmed.get(3..)?;
+        after_csi.trim_start_matches(|c| c == ',' || c == ' ')
     } else {
-        line
+        trimmed
     };
 
-    let parts: Vec<&str> = working_line.split(|c| c == ',' || c == ' ' || c == '\t')
-        .filter(|s| !s.is_empty())
-        .collect();
-    
-    if parts.is_empty() {
+    let parts: Vec<&str> = data_part.split(',').map(|s| s.trim()).collect();
+    if parts.len() < 3 {
         return None;
     }
 
-    // Try to find a timestamp (first parseable u64)
-    let mut timestamp: u64 = 0;
-    let mut csi_start_idx = 0;
-    
-    for (i, part) in parts.iter().enumerate() {
-        if let Ok(ts) = part.trim().parse::<u64>() {
-            timestamp = ts;
-            csi_start_idx = i + 1;
-            break;
-        }
-    }
-
-    // Parse remaining values as CSI data
-    let values: Vec<f32> = parts[csi_start_idx..]
+    let esp_timestamp: u64 = parts[0].parse().ok()?;
+    let rssi: i32 = parts[1].parse().ok()?;
+    let csi_values: Vec<i32> = parts[2..]
         .iter()
-        .filter_map(|s| {
-            let trimmed = s.trim();
-            // Try parsing as i32 first (CSI values are often signed integers)
-            if let Ok(v) = trimmed.parse::<i32>() {
-                return Some(v as f32);
-            }
-            // Try parsing as f32
-            if let Ok(v) = trimmed.parse::<f32>() {
-                return Some(v);
-            }
-            None
-        })
+        .filter_map(|s| s.parse::<i32>().ok())
         .collect();
-
-    if values.is_empty() {
+    if csi_values.is_empty() {
         return None;
     }
-
-    Some((timestamp, values))
+    Some(csi_packet::CsiPacket{
+        esp_timestamp,
+        rssi,
+        csi_values,
+    })
 }
 
 /// Log CSI frame to Rerun.
 fn log_csi_frame(
     rec: &rerun::RecordingStream,
     frame_idx: u64,
-    timestamp: u64,
-    csi_values: &[f32],
+    packet: &csi_packet::CsiPacket
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rerun::external::ndarray;
 
     // Set the time for this frame
     rec.set_time_sequence("frame", frame_idx as i64);
-    rec.set_time("timestamp", rerun::TimeCell::from_sequence(timestamp as i64));
+    rec.set_time("esp_time_us", rerun::TimeCell::from_sequence(packet.esp_timestamp as i64));
 
-    let num_values = csi_values.len();
+    rec.log("csi/rssi", &rerun::Scalars::new([packet.rssi as f64]));
 
     // Log as a 1D tensor (raw CSI values)
-    if num_values > 0 {
-        let array = ndarray::Array::from_vec(csi_values.to_vec())
+    let raw_values: Vec<f32> = packet.csi_values.iter().map(|&v| v as f32).collect();
+    if !raw_values.is_empty() {
+        let num_values = raw_values.len();
+        let array = ndarray::Array::from_vec(raw_values)
             .into_shape_with_order((1, num_values))?;
-        
-        rec.log("csi/raw_values", &rerun::Tensor::try_from(array)?)?;
+        rec.log("csi/raw_iq", &rerun::Tensor::try_from(array)?)?;
     }
 
-    // If you have I/Q pairs, also log amplitude and phase
-    if num_values >= 2 {
-        let num_subcarriers = num_values / 2;
-        let mut amplitudes = Vec::with_capacity(num_subcarriers);
-        let mut phases = Vec::with_capacity(num_subcarriers);
-
-        for i in 0..num_subcarriers {
-            let real = csi_values[i * 2];
-            let imag = csi_values[i * 2 + 1];
-            let amplitude = (real * real + imag * imag).sqrt();
-            let phase = imag.atan2(real);
-            amplitudes.push(amplitude);
-            phases.push(phase);
-        }
-
-        // Log amplitude as tensor
+    let amplitudes = packet.get_amplitudes();
+    if !amplitudes.is_empty() {
+        let num_subcarriers = amplitudes.len();
         let amp_array = ndarray::Array::from_vec(amplitudes.clone())
             .into_shape_with_order((1, num_subcarriers))?;
-        rec.log("csi/amplitude", &rerun::Tensor::try_from(amp_array)?)?;
-
-        // Log phase as tensor
-        let phase_array = ndarray::Array::from_vec(phases.clone())
-            .into_shape_with_order((1, num_subcarriers))?;
-        rec.log("csi/phase", &rerun::Tensor::try_from(phase_array)?)?;
-
-        // Log as 2D points (amplitude vs subcarrier index) for visualization
+        rec.log("csi/amplitude_tensor", &rerun::Tensor::try_from(amp_array)?)?;
         let points: Vec<rerun::Position2D> = amplitudes
             .iter()
             .enumerate()
             .map(|(i, &amp)| rerun::Position2D::new(i as f32, amp))
             .collect();
         rec.log("csi/amplitude_plot", &rerun::Points2D::new(points))?;
+        for (i, &amp) in amplitudes.iter().enumerate().step_by(8) {
+            rec.log(
+                format!("csi/subcarrier_{}/amplitude", i),
+                &rerun::Scalars::new([amp as f64]),
+            )?;
+        }
     }
-
+    let phases = packet.get_phases();
+    if !phases.is_empty() {
+        let num_subcarriers = phases.len();
+        let phase_array = ndarray::Array::from_vec(phases)
+            .into_shape_with_order((1, num_subcarriers))?;
+        rec.log("csi/phase_tensor", &rerun::Tensor::try_from(phase_array)?)?;
+    }
     Ok(())
 }
 
@@ -432,22 +445,17 @@ fn record_csi_to_file(
 
     // Set DTR to trigger ESP reset/start (important for many ESP boards)
     port.write_data_terminal_ready(true)?;
-    
     // Small delay to let the ESP initialize
     thread::sleep(Duration::from_millis(100));
-    
     // Clear any pending data in the buffer
     port.clear(serialport::ClearBuffer::All)?;
-
     let mut csv_out = File::create(csv_filename)?;
-
-    // Write CSV header
-    writeln!(csv_out, "timestamp_ms,raw_line")?;
+    let mut header_written = false;
 
     let start = Instant::now();
     let mut frame_idx: u64 = 0;
     let mut line_buffer = String::new();
-    let mut read_buffer = [0u8; 1024];
+    let mut read_buffer = [0u8; 2048];
     let mut lines_written: u64 = 0;
 
     while start.elapsed() < Duration::from_secs(seconds) {
@@ -463,22 +471,38 @@ fn record_csi_to_file(
                         let line: String = line_buffer.drain(..=newline_pos).collect();
                         let trimmed = line.trim();
                         
-                        if !trimmed.is_empty() {
-                            // Write raw line to CSV
-                            let elapsed_ms = start.elapsed().as_millis() as u64;
-                            //println!("elapsed_ms: {}", elapsed_ms);
-                            writeln!(csv_out, "{},{}", elapsed_ms, trimmed)?;
-                            lines_written += 1;
-
-                            // Try to parse and log to Rerun
-                            if let Some((timestamp, csi_values)) = parse_csi_line(trimmed) {
-                                if let Err(e) = log_csi_frame(&rec, frame_idx, timestamp, &csi_values) {
-                                    // Log error but continue
-                                    eprintln!("Rerun log error: {}", e);
-                                }
-                                frame_idx += 1;
-                            }
+                        if trimmed.is_empty() {
+                            continue;
                         }
+                        if let Some(packet) = parse_csi_line(trimmed) {
+                            if !header_written {
+                                let header = csv_utils::generate_csv_header(packet.csi_values.len());
+                                writeln!(csv_out, "{}", header)?;
+                                header_written = true;
+                            }
+                            csv_utils::write_csv_line(&mut csv_out, &packet)?;
+                            lines_written += 1;
+                            if let Err(e) = log_csi_frame(&rec, frame_idx, &packet) {
+                                eprintln!("Rerun log error: {}", e);
+                            }
+                            frame_idx += 1;
+                        }
+                        // if !trimmed.is_empty() {
+                        //     // Write raw line to CSV
+                        //     let elapsed_ms = start.elapsed().as_millis() as u64;
+                        //     //println!("elapsed_ms: {}", elapsed_ms);
+                        //     writeln!(csv_out, "{},{}", elapsed_ms, trimmed)?;
+                        //     lines_written += 1;
+
+                        //     // Try to parse and log to Rerun
+                        //     if let Some((timestamp, rssi, csi_values)) = parse_csi_line(trimmed) {
+                        //         if let Err(e) = log_csi_frame(&rec, frame_idx, timestamp, rssi, &csi_values) {
+                        //             // Log error but continue
+                        //             eprintln!("Rerun log error: {}", e);
+                        //         }
+                        //         frame_idx += 1;
+                        //     }
+                        // }
                     }
                 }
             }
@@ -500,15 +524,15 @@ fn record_csi_to_file(
             }
         }
     }
-
     // Flush CSV file
     csv_out.flush()?;
-
     // Flush the recording stream before dropping
     let _ = rec.flush_blocking();
-
     eprintln!("Recording complete. Lines written: {}, Frames logged: {}", lines_written, frame_idx);
-
+    // Ok(RecordingStats {
+    //     lines_written,
+    //     frames_logged: frame_idx,
+    // })
     Ok(())
 }
 
@@ -520,71 +544,3 @@ fn main() -> Result<()> {
     ratatui::restore();
     result
 }
-
-// /// Try to find an ESP32-like serial port.
-// ///
-// /// This is a *heuristic* similar in spirit to what espflash does:
-// /// - Prefer USB ports whose manufacturer/product mentions "esp" or "espressif"
-// /// - Fallback to the first ttyACM/ttyUSB.
-// fn find_esp_port() -> Option<String> {
-//     let ports = serialport::available_ports().ok()?;
-
-//     // First pass: look for USB ports that look like ESP.
-//     for p in &ports {
-//         if let SerialPortType::UsbPort(usb) = &p.port_type {
-//             let product = usb.product.as_deref().unwrap_or("").to_lowercase();
-//             let manufacturer = usb.manufacturer.as_deref().unwrap_or("").to_lowercase();
-//             if product.contains("esp") || manufacturer.contains("espressif") {
-//                 return Some(p.port_name.clone());
-//             }
-//         }
-//     }
-
-//     // Second pass: pick first ttyACM or ttyUSB as a reasonable default on Linux.
-//     ports
-//         .into_iter()
-//         .map(|p| p.port_name)
-//         .find(|name| name.contains("ttyACM") || name.contains("ttyUSB"))
-// }
-
-// /// Blocking worker: open serial port, read lines for `seconds`, write to CSV file.
-// fn record_csi_to_file(
-//     port_name: &str,
-//     filename: &str,
-//     seconds: u64,
-// ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//     let mut port = serialport::new(port_name, 115_200)
-//         .timeout(Duration::from_millis(200))
-//         .open()?;
-
-//     let mut reader = BufReader::new(port);
-//     let mut out = File::create(filename)?;
-
-//     let start = Instant::now();
-//     let mut line = String::new();
-
-//     while start.elapsed() < Duration::from_secs(seconds) {
-//         line.clear();
-//         match reader.read_line(&mut line) {
-//             Ok(0) => {
-//                 // No data available right now (timeout); just continue.
-//                 continue;
-//             }
-//             Ok(_) => {
-//                 let trimmed = line.trim_end();
-//                 if !trimmed.is_empty() {
-//                     writeln!(out, "{}", trimmed)?;
-//                 }
-//             }
-//             Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-//                 continue;
-//             }
-//             Err(e) => {
-//                 eprintln!("Serial read error: {e}");
-//                 break;
-//             }
-//         }
-//     }
-
-//     Ok(())
-// }
