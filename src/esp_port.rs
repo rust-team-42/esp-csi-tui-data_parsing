@@ -1,5 +1,5 @@
 
-use serialport::{SerialPortType, DataBits, FlowControl, Parity, StopBits};
+use serialport::{SerialPortType};
 
 pub fn find_esp_port() -> Option<String> {
     let ports = serialport::available_ports().ok()?;
