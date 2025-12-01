@@ -11,6 +11,7 @@ use crate::csv_utils;
 //use crate::esp_port;
 use crate::csi_packet;
 use crate::detect_motion;
+use crate::csi_packet::CsiCliParser;
 //use crate::app;
 
 pub fn parse_csi_line(line: &str) -> Option<csi_packet::CsiPacket> {
@@ -119,22 +120,26 @@ pub fn record_csi_to_file(
 
     // Set DTR to trigger ESP reset/start (important for many ESP boards)
     port.write_data_terminal_ready(true)?;
+    std::thread::sleep(Duration::from_millis(100));
     // Small delay to let the ESP initialize
-    thread::sleep(Duration::from_millis(100));
     // Clear any pending data in the buffer
     port.clear(serialport::ClearBuffer::All)?;
+    port.write_all(b"start\r\n")?;
+    port.flush()?;
     let mut csv_out = File::create(csv_filename)?;
     let mut header_written = false;
-
     let start = Instant::now();
     let mut frame_idx: u64 = 0;
     let mut line_buffer = String::new();
     let mut read_buffer = [0u8; 2048];
     let mut lines_written: u64 = 0;
+    let mut parser = CsiCliParser::new();
 
     while start.elapsed() < Duration::from_secs(seconds) {
+        
         match port.read(&mut read_buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
+                //println!("read_buffer: {}\n", read_buffer);
                 // Convert bytes to string and append to line buffer
                 if let Ok(chunk) = std::str::from_utf8(&read_buffer[..bytes_read]) {
                     //println!("{}", chunk);
@@ -148,12 +153,13 @@ pub fn record_csi_to_file(
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if let Some(packet) = parse_csi_line(trimmed) {
+                        if let Some(packet) = parser.feed_line(trimmed) {
                             if !header_written {
                                 let header = csv_utils::generate_csv_header(packet.csi_values.len());
                                 writeln!(csv_out, "{}", header)?;
                                 header_written = true;
                             }
+                            println!("ts:{}, rssi:{}", packet.esp_timestamp, packet.rssi);
                             csv_utils::write_csv_line(&mut csv_out, &packet)?;
                             lines_written += 1;
                             if let Err(e) = log_csi_frame(&rec, frame_idx, &packet) {
@@ -161,6 +167,7 @@ pub fn record_csi_to_file(
                             }
                             frame_idx += 1;
                         }
+                        //writeln!(csv_out, "{}", trimmed);
                     }
                 }
                 // if let Some(amp) = detec_motion::amplitude_for_subcarrier(packet, SUBCARRIER) {
@@ -174,14 +181,17 @@ pub fn record_csi_to_file(
                 // }
             }
             Ok(_) => {
+                println!("No data read");
                 // No data read, continue
             }
             Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
                 // Timeout is expected, just continue
+                println!("TimeOut");
                 continue;
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // Would block, sleep a bit and continue
+                println!("Wouldblock");
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }

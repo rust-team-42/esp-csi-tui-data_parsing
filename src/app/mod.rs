@@ -260,9 +260,11 @@ impl App {
                 if self.filename.is_empty() {
                     self.status = "Filename cannot be empty.".into();
                 } else {
-                    self.step = Step::ChooseAction;
-                    self.status = "Press R to record new data, or O to open existing .csv file".into();
-                    self.load_file_for_plot();
+                    // self.step = Step::ChooseAction;
+                    // self.status = "Press R to record new data, or O to open existing .csv file".into();
+                    // self.load_file_for_plot();
+                    self.step = Step::EnterDuration;
+                    self.status = "Now type duration in seconds and press Enter.".into();
                 }
             }
             _ => {}
