@@ -8,6 +8,7 @@ pub mod csi_packet;
 pub mod parse_data;
 pub mod detect_motion;
 pub mod read_data;
+pub mod wifi_mode;
 
 /// Entry point: initialize terminal + run app.
 fn main() -> Result<()> {

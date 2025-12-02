@@ -8,58 +8,21 @@ use std::{
 use color_eyre::Result;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
 use crate::csv_utils;
-//use crate::esp_port;
 use crate::csi_packet;
 use crate::detect_motion;
 use crate::csi_packet::CsiCliParser;
-//use crate::app;
 
-pub fn parse_csi_line(line: &str) -> Option<csi_packet::CsiPacket> {
-    let trimmed = line.trim();
 
-    let data_part = if trimmed.to_lowercase().starts_with("csi") {
-        let after_csi = trimmed.get(3..)?;
-        after_csi.trim_start_matches(|c| c == ',' || c == ' ')
-    } else {
-        trimmed
-    };
-
-    let parts: Vec<&str> = data_part.split(',').map(|s| s.trim()).collect();
-    if parts.len() < 3 {
-        return None;
-    }
-
-    let esp_timestamp: u64 = parts[0].parse().ok()?;
-    let rssi: i32 = parts[1].parse().ok()?;
-    let csi_values: Vec<i32> = parts[2..]
-        .iter()
-        .filter_map(|s| s.parse::<i32>().ok())
-        .collect();
-    if csi_values.is_empty() {
-        return None;
-    }
-    Some(csi_packet::CsiPacket{
-        esp_timestamp,
-        rssi,
-        csi_values,
-    })
-}
-
-/// Log CSI frame to Rerun.
 pub fn log_csi_frame(
     rec: &rerun::RecordingStream,
     frame_idx: u64,
     packet: &csi_packet::CsiPacket
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rerun::external::ndarray;
-
-    // Set the time for this frame
     rec.set_time_sequence("frame", frame_idx as i64);
     rec.set_time("esp_time_us", rerun::TimeCell::from_sequence(packet.esp_timestamp as i64));
 
     rec.log("csi/rssi", &rerun::Scalars::new([packet.rssi as f64]));
-
-    // Log as a 1D tensor (raw CSI values)
     let raw_values: Vec<f32> = packet.csi_values.iter().map(|&v| v as f32).collect();
     if !raw_values.is_empty() {
         let num_values = raw_values.len();
@@ -167,18 +130,8 @@ pub fn record_csi_to_file(
                             }
                             frame_idx += 1;
                         }
-                        //writeln!(csv_out, "{}", trimmed);
                     }
                 }
-                // if let Some(amp) = detec_motion::amplitude_for_subcarrier(packet, SUBCARRIER) {
-                //     let t = if first_ts.is_none() {
-                //         first_ts = Some(packet.esp_timestamp);
-                //         0.0
-                //     } else {
-                //         detec_motion::time_in_seconds(first_ts.unwrap(), &packet)
-                //     };
-                //     let _ = plot_tx.send((t, amp));
-                // }
             }
             Ok(_) => {
                 println!("No data read");
