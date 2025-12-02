@@ -12,3 +12,9 @@ impl WifiMode {
         }
     }
 }
+
+pub struct WifiConfig {
+    pub mode:WifiMode,
+    pub station_ssid:Option<String>,
+    pub station_password: Option<String>,
+}

@@ -1,21 +1,20 @@
-use std::{
-    sync::mpsc,
-    thread,
-    time::{Duration},
-};
+use crate::esp_port;
+use crate::parse_data;
+use crate::read_data;
+use crate::wifi_mode::WifiConfig;
+use crate::wifi_mode::WifiMode;
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
-    style::Stylize,
-    text::{Line, Text},
-    widgets::{Block, Paragraph, Chart, Axis, Dataset, GraphType},
-    layout::{Layout, Constraint, Direction},
-    style::Color,
     DefaultTerminal, Frame,
+    layout::{Constraint, Direction, Layout},
+    style::Stylize,
+    style::{Color, Style},
+    text::{Line, Span, Text},
+    widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph},
 };
-use crate::esp_port::{self, find_esp_port};
-use crate::parse_data;
-use crate::read_data;
+use std::fs::{self};
+use std::{sync::mpsc, thread, time::Duration};
 
 #[derive(Debug)]
 struct RecordingStats {
@@ -36,16 +35,25 @@ enum Step {
 /// The main application which holds the state and logic of the application.
 #[derive(Debug)]
 pub struct App {
-    running: bool, /// Is the application running?
-    step: Step, /// Current UI / recording step.
-    detected_port: Option<String>, /// Detected serial port (e.g. "/dev/ttyACM0").
-    filename: String, /// Filename the user types (e.g. "walk1").
-    duration_input: String, /// Duration in seconds (typed as text, e.g. "10").
-    status: String, /// Status message to show at bottom.
+    running: bool,
+    /// Is the application running?
+    step: Step,
+    /// Current UI / recording step.
+    detected_port: Option<String>,
+    /// Detected serial port (e.g. "/dev/ttyACM0").
+    filename: String,
+    /// Filename the user types (e.g. "walk1").
+    duration_input: String,
+    /// Duration in seconds (typed as text, e.g. "10").
+    status: String,
+    /// Status message to show at bottom.
     /// Channel to receive completion message from worker thread.
+    wifi_mode: WifiMode,
     worker_done_rx: Option<mpsc::Receiver<std::result::Result<(), String>>>,
     plot_points: Vec<(f64, f64)>,
     is_sniffer_mode: bool,
+    nav_selected: usize,
+    nav_item_selected: usize,
     //first_ts: Option<u64>,
     subcarrier: usize,
     esp_port: Option<String>,
@@ -56,7 +64,9 @@ impl Default for App {
     fn default() -> Self {
         let detected_port = esp_port::find_esp_port();
         let status = match &detected_port {
-            Some(p) => format!("Detected port: {p}. Type filename (without extension) and press Enter."),
+            Some(p) => {
+                format!("Detected port: {p}. Type filename (without extension) and press Enter.")
+            }
             None => "No ESP port detected. Type filename anyway, then duration.".to_string(),
         };
         Self {
@@ -68,10 +78,13 @@ impl Default for App {
             status,
             worker_done_rx: None,
             plot_points: Vec::new(),
-            is_sniffer_mode: true,
             subcarrier: 20,
-            esp_port: find_esp_port(),
+            wifi_mode:WifiMode::Sniffer,
+            esp_port: esp_port::find_esp_port(),
             plot_rx: None,
+            is_sniffer_mode: true,
+            nav_selected: 0,
+            nav_item_selected: 0,
         }
     }
 }
@@ -97,65 +110,137 @@ impl App {
     /// Renders the user interface.
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
-
-        let title = Line::from("ESP32-C3 CSI Recorder")
-            .bold()
-            .blue()
-            .centered();
-
-        let mut text = Text::default();
-
-        // Port info
-        let port_line = match &self.esp_port{
-            Some(p) => format!("Serial port: {p}"),
-            None => "Serial port: <none detected, will fail unless you choose manually>".to_string(),
-        };
-        text.extend([Line::from(port_line)]);
-
-        text.extend([Line::from("")]);
-
-        // Filename input
-        text.extend([Line::from(format!(
-            "Filename (without extension): {}",
-            self.filename
-        ))]);
-
-        // Duration input
-        text.extend([Line::from(format!(
-            "Duration (seconds): {}",
-            self.duration_input
-        ))]);
-        text.extend([Line::from("")]);
-        // Instructions based on step
-        let help_line = match self.step {
-            Step::EnterFilename => "Type filename (without .csv/.rrd) and press Enter.",
-            Step::ChooseAction => "Press R to record new data, or O to open existing .csv file.",
-            Step::EnterDuration => "Type duration in seconds and press Enter.",
-            Step::Recording => "Recording... press q/Esc to quit early.",
-            Step::Finished => "Finished. Press q/Esc to quit.",
-        };
-        text.extend([Line::from(help_line)]);
-        text.extend([Line::from("")]);
-        text.extend([Line::from(format!("Status: {}", self.status))]);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),
-                Constraint::Length(10),
-            ])
+        let layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![Constraint::Percentage(20), Constraint::Percentage(80)])
             .split(area);
-        let text_area = chunks[0];
-        let chart_area = chunks[1];
+
+        let nav_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(layout[0]);
+
+        let body_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(vec![Constraint::Percentage(10), Constraint::Percentage(90)])
+            .split(layout[1]);
+
+        // --- Left nav: top (controls) ---
+        let controls = vec![
+            format!(
+                "{} Sniffer",
+                if self.is_sniffer_mode { "[x]" } else { "[ ]" }
+            ),
+            format!(
+                "{} Station",
+                if !self.is_sniffer_mode { "[x]" } else { "[ ]" }
+            ),
+            format!("SSID: {}", ""),
+            format!("Password: {}", ""),
+            format!("Duration (s): {}", self.duration_input),
+            format!("Filename: {}", self.filename),
+        ];
+
+        let mut nav_top = Text::default();
+        for (i, line) in controls.iter().enumerate() {
+            if self.nav_selected == 0 && self.nav_item_selected == i {
+                nav_top.extend([Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(Color::Cyan),
+                ))]);
+            } else {
+                nav_top.extend([Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(Color::White),
+                ))]);
+            }
+        }
+
+        let options_block = if self.nav_selected == 0 {
+            Block::bordered()
+                .title("Options")
+                .style(Style::default().fg(Color::Cyan))
+        } else {
+            Block::bordered().title("Options")
+        };
+
+        frame.render_widget(Paragraph::new(nav_top).block(options_block), nav_layout[0]);
+
+        // --- Left nav: bottom (saved files list) ---
+        let mut files_text = Text::default();
+        files_text.extend([Line::from("Files in repo root:")]);
+        let mut files_vec: Vec<String> = Vec::new();
+        if let Ok(entries) = fs::read_dir(".") {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name.ends_with(".csv") || name.ends_with(".rrd") {
+                                files_vec.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if files_vec.is_empty() {
+            files_text.extend([Line::from(Span::styled(
+                "<no saved .csv/.rrd files>".to_string(),
+                Style::default().fg(Color::White),
+            ))]);
+        } else {
+            for (i, name) in files_vec.iter().enumerate() {
+                if self.nav_selected == 1 && self.nav_item_selected == i {
+                    files_text.extend([Line::from(Span::styled(
+                        name.clone(),
+                        Style::default().fg(Color::Cyan),
+                    ))]);
+                } else {
+                    files_text.extend([Line::from(Span::styled(
+                        name.clone(),
+                        Style::default().fg(Color::White),
+                    ))]);
+                }
+            }
+        }
+
+        let files_block = if self.nav_selected == 1 {
+            Block::bordered()
+                .title("Saved Files")
+                .style(Style::default().fg(Color::Cyan))
+        } else {
+            Block::bordered().title("Saved Files")
+        };
+
+        frame.render_widget(Paragraph::new(files_text).block(files_block), nav_layout[1]);
+
+        // --- Body top: connection / status ---
+        let mut status_text = Text::default();
+        let port_line = match &self.detected_port {
+            Some(p) => format!("Detected port: {p}"),
+            None => "Detected port: <none>".to_string(),
+        };
+        status_text.extend([Line::from(port_line)]);
+        status_text.extend([Line::from(format!("Status: {}", self.status))]);
         frame.render_widget(
-            Paragraph::new(text).block(Block::bordered().title(title)),
-            text_area,
+            Paragraph::new(status_text).block(Block::bordered().title("Connection Status")),
+            body_layout[0],
         );
+
+        // --- Body bottom: plot / details area ---
         if !self.plot_points.is_empty() {
             let (t_min, t_max) = self
                 .plot_points
                 .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (t, _)| {
+                    (mn.min(*t), mx.max(*t))
+                });
+            let (_, a_max) = self
+                .plot_points
+                .iter()
                 .fold((0.0f64, 0.0f64), |(mn, mx), (_, a)| {
-                    (mn.min(*a as f64), mx.max(*a as f64))
+                    (mn.min(*a), mx.max(*a))
                 });
             let (_, a_max) = self
                 .plot_points
@@ -179,9 +264,18 @@ impl App {
                 .y_axis(
                     Axis::default()
                         .title("amplitude")
-                        .bounds([0.0, t_max.max(1.0)]),
+                        .bounds([0.0, a_max.max(1.0)]),
                 );
-            frame.render_widget(chart, chart_area);
+            frame.render_widget(chart, body_layout[1]);
+        } else {
+            let mut placeholder = Text::default();
+            placeholder.extend([Line::from("Plot area (no data)")]);
+            placeholder.extend([Line::from("")]);
+            placeholder.extend([Line::from("Recorded and loaded files will appear here.")]);
+            frame.render_widget(
+                Paragraph::new(placeholder).block(Block::bordered().title("Plot Area")),
+                body_layout[1],
+            );
         }
     }
 
@@ -204,10 +298,110 @@ impl App {
         if matches!(
             (key.modifiers, key.code),
             (_, KeyCode::Esc | KeyCode::Char('q'))
-                | (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C'))
+                | (
+                    KeyModifiers::CONTROL,
+                    KeyCode::Char('c') | KeyCode::Char('C')
+                )
         ) {
             self.quit();
             return;
+        }
+
+        // Navigation: Tab switches nav panels, Up/Down move within active panel,
+        // Space toggles checkboxes (or loads a file when on files list).
+        match key.code {
+            KeyCode::Tab => {
+                self.nav_selected = (self.nav_selected + 1) % 2;
+                self.nav_item_selected = 0;
+                return;
+            }
+            KeyCode::Up => {
+                if self.nav_selected == 0 {
+                    if self.nav_item_selected > 0 {
+                        self.nav_item_selected -= 1;
+                    }
+                } else {
+                    // files list
+                    let files_len = fs::read_dir(".")
+                        .map(|e| {
+                            e.filter_map(|x| x.ok())
+                                .filter(|d| d.metadata().map(|m| m.is_file()).unwrap_or(false))
+                                .filter_map(|d| d.file_name().into_string().ok())
+                                .filter(|n| n.ends_with(".csv") || n.ends_with(".rrd"))
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    if files_len > 0 && self.nav_item_selected > 0 {
+                        self.nav_item_selected -= 1;
+                    }
+                }
+                return;
+            }
+            KeyCode::Down => {
+                if self.nav_selected == 0 {
+                    let controls_len = 6;
+                    if self.nav_item_selected + 1 < controls_len {
+                        self.nav_item_selected += 1;
+                    }
+                } else {
+                    let files_len = fs::read_dir(".")
+                        .map(|e| {
+                            e.filter_map(|x| x.ok())
+                                .filter(|d| d.metadata().map(|m| m.is_file()).unwrap_or(false))
+                                .filter_map(|d| d.file_name().into_string().ok())
+                                .filter(|n| n.ends_with(".csv") || n.ends_with(".rrd"))
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    if files_len > 0 && self.nav_item_selected + 1 < files_len {
+                        self.nav_item_selected += 1;
+                    }
+                }
+                return;
+            }
+            KeyCode::Char(' ') => {
+                if self.nav_selected == 0 {
+                    match self.nav_item_selected {
+                        0 => {
+                            self.is_sniffer_mode = true;
+                            self.wifi_mode = WifiMode::Sniffer;
+                        }
+                        1 => {
+                            self.is_sniffer_mode = false;
+                            self.wifi_mode = WifiMode::Station;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    // load selected file into filename and attempt to load
+                    let mut files_vec: Vec<String> = Vec::new();
+                    if let Ok(entries) = fs::read_dir(".") {
+                        for entry in entries.flatten() {
+                            if let Ok(meta) = entry.metadata() {
+                                if meta.is_file() {
+                                    if let Some(name) = entry.file_name().to_str() {
+                                        if name.ends_with(".csv") || name.ends_with(".rrd") {
+                                            files_vec.push(name.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !files_vec.is_empty() && self.nav_item_selected < files_vec.len() {
+                        let selected = files_vec[self.nav_item_selected].clone();
+                        // strip extension for filename state
+                        if let Some(pos) = selected.rfind('.') {
+                            self.filename = selected[..pos].to_string();
+                        } else {
+                            self.filename = selected;
+                        }
+                        self.load_file_for_plot();
+                    }
+                }
+                return;
+            }
+            _ => {}
         }
 
         match self.step {
@@ -285,9 +479,9 @@ impl App {
         self.step = Step::Recording;
         let (tx, rx) = mpsc::channel();
         self.worker_done_rx = Some(rx);
+        let wifi_mode = self.wifi_mode;
         thread::spawn(move || {
-            let res = parse_data::record_csi_to_file(&port, &csv_filename, 
-                    &rrd_filename, secs)
+            let res = parse_data::record_csi_to_file(&port, &csv_filename, &rrd_filename, wifi_mode, secs)
                 .map_err(|e| e.to_string());
             let _ = tx.send(res);
         });
@@ -326,8 +520,7 @@ impl App {
             return;
         }
         let path = format!("{filename}.csv");
-        match read_data::load_csv_amplitude_series(&path, self.subcarrier)
-        {
+        match read_data::load_csv_amplitude_series(&path, self.subcarrier) {
             Ok(points) => {
                 if points.is_empty() {
                     self.status = format!("File {} loaded but contained no valid data.", path);
@@ -350,7 +543,7 @@ impl App {
 
     fn refresh_esp(&mut self) {
         let old = self.esp_port.clone();
-        let new = find_esp_port();
+        let new = esp_port::find_esp_port();
 
         if new != old {
             self.esp_port = new.clone();
@@ -364,7 +557,7 @@ impl App {
                 _ => {}
             }
         }
-        self.esp_port = find_esp_port();
+        self.esp_port = esp_port::find_esp_port();
     }
 
     fn quit(&mut self) {

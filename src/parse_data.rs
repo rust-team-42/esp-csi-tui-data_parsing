@@ -64,8 +64,8 @@ pub fn record_csi_to_file(
     port_name: &str,
     csv_filename: &str,
     rrd_filename: &str,
-    seconds: u64,
     wifi_mode: WifiMode,
+    seconds: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize Rerun recording stream
     let rec = rerun::RecordingStreamBuilder::new("esp-csi-tui-rs")
@@ -90,8 +90,8 @@ pub fn record_csi_to_file(
     std::thread::sleep(Duration::from_millis(200));
     send_cli_command(&mut *port, "start")?;
     std::thread::sleep(Duration::from_millis(100));
-    port.write_all(b"start\r\n")?;
-    port.flush()?;
+    //port.write_all(b"start\r\n")?;
+    //port.flush()?;
     let mut csv_out = File::create(csv_filename)?;
     let mut header_written = false;
     let start = Instant::now();
