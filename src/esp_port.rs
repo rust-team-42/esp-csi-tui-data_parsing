@@ -42,6 +42,7 @@ pub fn find_esp_port() -> Option<String> {
             .into_iter()
             .find(|port| port.port_name.eq_ignore_ascii_case("COM4"))
             .map(|port| port.port_name);
+        return found
     }
 
     #[allow(unreachable_code)]
