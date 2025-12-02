@@ -49,6 +49,8 @@ pub struct App {
     /// Status message to show at bottom.
     /// Channel to receive completion message from worker thread.
     wifi_mode: WifiMode,
+    ssid: String,
+    password: String,
     worker_done_rx: Option<mpsc::Receiver<std::result::Result<(), String>>>,
     plot_points: Vec<(f64, f64)>,
     is_sniffer_mode: bool,
@@ -79,7 +81,9 @@ impl Default for App {
             worker_done_rx: None,
             plot_points: Vec::new(),
             subcarrier: 20,
-            wifi_mode:WifiMode::Sniffer,
+            wifi_mode: WifiMode::Sniffer,
+            ssid: String::new(),
+            password: String::new(),
             esp_port: esp_port::find_esp_port(),
             plot_rx: None,
             is_sniffer_mode: true,
@@ -135,8 +139,8 @@ impl App {
                 "{} Station",
                 if !self.is_sniffer_mode { "[x]" } else { "[ ]" }
             ),
-            format!("SSID: {}", ""),
-            format!("Password: {}", ""),
+            format!("SSID: {}", self.ssid),
+            format!("Password: {}", "*".repeat(self.password.len())),
             format!("Duration (s): {}", self.duration_input),
             format!("Filename: {}", self.filename),
         ];
@@ -222,7 +226,13 @@ impl App {
             None => "Detected port: <none>".to_string(),
         };
         status_text.extend([Line::from(port_line)]);
-        status_text.extend([Line::from(format!("Status: {}", self.status))]);
+        // status_text.extend([Line::from(format!("Status: {}", self.status))]);
+        // // Key instructions for interacting with the UI
+        // status_text.extend([Line::from("")]);
+        // status_text.extend([Line::from(Span::styled(
+        //     "Keys: Tab=Switch pane  ↑/↓=Navigate  Space=Toggle/Load  Enter=Confirm  Ctrl+S=Record  Esc/Ctrl+C=Quit",
+        //     Style::default().fg(Color::Gray),
+        // ))]);
         frame.render_widget(
             Paragraph::new(status_text).block(Block::bordered().title("Connection Status")),
             body_layout[0],
@@ -273,7 +283,7 @@ impl App {
             placeholder.extend([Line::from("")]);
             placeholder.extend([Line::from("Recorded and loaded files will appear here.")]);
             frame.render_widget(
-                Paragraph::new(placeholder).block(Block::bordered().title("Plot Area")),
+                Paragraph::new(placeholder).block(Block::bordered().title("Plot Area").title_bottom("Keys: Tab=Switch pane  ↑/↓=Navigate  Space=Toggle/Load  Enter=Confirm  Ctrl+S=Record  Esc/Ctrl+C=Quit")),
                 body_layout[1],
             );
         }
@@ -297,7 +307,7 @@ impl App {
         // Global quit shortcuts
         if matches!(
             (key.modifiers, key.code),
-            (_, KeyCode::Esc | KeyCode::Char('q'))
+            (_, KeyCode::Esc)
                 | (
                     KeyModifiers::CONTROL,
                     KeyCode::Char('c') | KeyCode::Char('C')
@@ -307,8 +317,100 @@ impl App {
             return;
         }
 
+        // Ctrl+S - start recording from the current controls if possible
+        if key.modifiers == KeyModifiers::CONTROL {
+            if let KeyCode::Char('s') | KeyCode::Char('S') = key.code {
+                // Validate filename and duration
+                if self.filename.trim().is_empty() {
+                    self.status = "Filename cannot be empty.".into();
+                    return;
+                }
+                if self.duration_input.trim().is_empty() {
+                    self.status = "Duration cannot be empty.".into();
+                    return;
+                }
+                let secs: u64 = match self.duration_input.parse() {
+                    Ok(v) if v > 0 => v,
+                    _ => {
+                        self.status = "Duration must be a positive integer.".into();
+                        return;
+                    }
+                };
+                self.start_recording(secs);
+                return;
+            }
+        }
+
         // Navigation: Tab switches nav panels, Up/Down move within active panel,
         // Space toggles checkboxes (or loads a file when on files list).
+        // If the controls pane is focused, route typing/backspace/enter to the active field.
+        match key.code {
+            KeyCode::Char(c) => {
+                if self.nav_selected == 0 {
+                    match self.nav_item_selected {
+                        2 => {
+                            self.ssid.push(c);
+                            return;
+                        }
+                        3 => {
+                            self.password.push(c);
+                            return;
+                        }
+                        4 => {
+                            if c.is_ascii_digit() {
+                                self.duration_input.push(c);
+                            }
+                            return;
+                        }
+                        5 => {
+                            self.filename.push(c);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if self.nav_selected == 0 {
+                    match self.nav_item_selected {
+                        2 => {
+                            self.ssid.pop();
+                            return;
+                        }
+                        3 => {
+                            self.password.pop();
+                            return;
+                        }
+                        4 => {
+                            self.duration_input.pop();
+                            return;
+                        }
+                        5 => {
+                            self.filename.pop();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if self.nav_selected == 0 && self.nav_item_selected == 5 {
+                    if self.filename.is_empty() {
+                        self.status = "Filename cannot be empty.".into();
+                    } else {
+                        self.step = Step::ChooseAction;
+                        self.status =
+                            "Press R to record new data, or O to open existing .csv file".into();
+                        self.load_file_for_plot();
+                    }
+                    return;
+                }
+            }
+
+            _ => {}
+        }
+
+        // Navigation keys and space handling
         match key.code {
             KeyCode::Tab => {
                 self.nav_selected = (self.nav_selected + 1) % 2;
@@ -404,6 +506,73 @@ impl App {
             _ => {}
         }
 
+        // If the controls pane is focused, let typing/backspace modify the active field.
+        match key.code {
+            KeyCode::Char(c) => {
+                if self.nav_selected == 0 {
+                    match self.nav_item_selected {
+                        2 => {
+                            self.ssid.push(c);
+                            return;
+                        }
+                        3 => {
+                            self.password.push(c);
+                            return;
+                        }
+                        4 => {
+                            if c.is_ascii_digit() {
+                                self.duration_input.push(c);
+                            }
+                            return;
+                        }
+                        5 => {
+                            self.filename.push(c);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if self.nav_selected == 0 {
+                    match self.nav_item_selected {
+                        2 => {
+                            self.ssid.pop();
+                            return;
+                        }
+                        3 => {
+                            self.password.pop();
+                            return;
+                        }
+                        4 => {
+                            self.duration_input.pop();
+                            return;
+                        }
+                        5 => {
+                            self.filename.pop();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // If Enter on Filename when controls focused, behave like filename Enter.
+                if self.nav_selected == 0 && self.nav_item_selected == 5 {
+                    if self.filename.is_empty() {
+                        self.status = "Filename cannot be empty.".into();
+                    } else {
+                        self.step = Step::ChooseAction;
+                        self.status =
+                            "Press R to record new data, or O to open existing .csv file".into();
+                        self.load_file_for_plot();
+                    }
+                    return;
+                }
+            }
+            _ => {}
+        }
+
         match self.step {
             Step::EnterFilename => self.handle_filename_input(key),
             Step::ChooseAction => self.handle_duration_input(key),
@@ -427,7 +596,8 @@ impl App {
                     self.status = "Filename cannot be empty.".into();
                 } else {
                     self.step = Step::ChooseAction;
-                    self.status = "Press R to record new data, or O to open existing .csv file".into();
+                    self.status =
+                        "Press R to record new data, or O to open existing .csv file".into();
                     self.load_file_for_plot();
                     // self.step = Step::EnterDuration;
                     // self.status = "Now type duration in seconds and press Enter.".into();
@@ -481,8 +651,14 @@ impl App {
         self.worker_done_rx = Some(rx);
         let wifi_mode = self.wifi_mode;
         thread::spawn(move || {
-            let res = parse_data::record_csi_to_file(&port, &csv_filename, &rrd_filename, wifi_mode, secs)
-                .map_err(|e| e.to_string());
+            let res = parse_data::record_csi_to_file(
+                &port,
+                &csv_filename,
+                &rrd_filename,
+                wifi_mode,
+                secs,
+            )
+            .map_err(|e| e.to_string());
             let _ = tx.send(res);
         });
     }
@@ -494,6 +670,8 @@ impl App {
                 Ok(Ok(())) => {
                     self.status = "Recording finished successfully.".into();
                     self.step = Step::Finished;
+                    // Try to load the recorded CSV into the plot area
+                    self.load_file_for_plot();
                     self.worker_done_rx = None;
                 }
                 Ok(Err(err)) => {
@@ -547,7 +725,7 @@ impl App {
 
         if new != old {
             self.esp_port = new.clone();
-            match(&old, &new) {
+            match (&old, &new) {
                 (None, Some(p)) => {
                     self.status = format!("ESP connected on {p}");
                 }

@@ -1,3 +1,8 @@
+use crate::csi_packet;
+use crate::csi_packet::CsiCliParser;
+use crate::{csv_utils, esp_port::send_cli_command, wifi_mode::WifiMode};
+use color_eyre::Result;
+use serialport::{DataBits, FlowControl, Parity, StopBits};
 use std::{
     fs::File,
     io::{self, Read, Write},
@@ -5,28 +10,24 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use color_eyre::Result;
-use serialport::{DataBits, FlowControl, Parity, StopBits};
-use crate::{csv_utils, esp_port::send_cli_command, wifi_mode::WifiMode};
-use crate::csi_packet;
-use crate::csi_packet::CsiCliParser;
-
 
 pub fn log_csi_frame(
     rec: &rerun::RecordingStream,
     frame_idx: u64,
-    packet: &csi_packet::CsiPacket
+    packet: &csi_packet::CsiPacket,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use rerun::external::ndarray;
     rec.set_time_sequence("frame", frame_idx as i64);
-    rec.set_time("esp_time_us", rerun::TimeCell::from_sequence(packet.esp_timestamp as i64));
+    rec.set_time(
+        "esp_time_us",
+        rerun::TimeCell::from_sequence(packet.esp_timestamp as i64),
+    );
 
     rec.log("csi/rssi", &rerun::Scalars::new([packet.rssi as f64]));
     let raw_values: Vec<f32> = packet.csi_values.iter().map(|&v| v as f32).collect();
     if !raw_values.is_empty() {
         let num_values = raw_values.len();
-        let array = ndarray::Array::from_vec(raw_values)
-            .into_shape_with_order((1, num_values))?;
+        let array = ndarray::Array::from_vec(raw_values).into_shape_with_order((1, num_values))?;
         rec.log("csi/raw_iq", &rerun::Tensor::try_from(array)?)?;
     }
 
@@ -52,8 +53,8 @@ pub fn log_csi_frame(
     let phases = packet.get_phases();
     if !phases.is_empty() {
         let num_subcarriers = phases.len();
-        let phase_array = ndarray::Array::from_vec(phases)
-            .into_shape_with_order((1, num_subcarriers))?;
+        let phase_array =
+            ndarray::Array::from_vec(phases).into_shape_with_order((1, num_subcarriers))?;
         rec.log("csi/phase_tensor", &rerun::Tensor::try_from(phase_array)?)?;
     }
     Ok(())
@@ -68,8 +69,7 @@ pub fn record_csi_to_file(
     seconds: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize Rerun recording stream
-    let rec = rerun::RecordingStreamBuilder::new("esp-csi-tui-rs")
-        .save(rrd_filename)?;
+    let rec = rerun::RecordingStreamBuilder::new("esp-csi-tui-rs").save(rrd_filename)?;
 
     // Open serial port with explicit settings
     let mut port = serialport::new(port_name, 115_200)
@@ -102,7 +102,6 @@ pub fn record_csi_to_file(
     let mut parser = CsiCliParser::new();
 
     while start.elapsed() < Duration::from_secs(seconds) {
-        
         match port.read(&mut read_buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
                 //println!("read_buffer: {}\n", read_buffer);
@@ -110,26 +109,27 @@ pub fn record_csi_to_file(
                 if let Ok(chunk) = std::str::from_utf8(&read_buffer[..bytes_read]) {
                     //println!("{}", chunk);
                     line_buffer.push_str(chunk);
-                    
+
                     // Process complete lines
                     while let Some(newline_pos) = line_buffer.find('\n') {
                         let line: String = line_buffer.drain(..=newline_pos).collect();
                         let trimmed = line.trim();
-                        
+
                         if trimmed.is_empty() {
                             continue;
                         }
                         if let Some(packet) = parser.feed_line(trimmed) {
                             if !header_written {
-                                let header = csv_utils::generate_csv_header(packet.csi_values.len());
+                                let header =
+                                    csv_utils::generate_csv_header(packet.csi_values.len());
                                 writeln!(csv_out, "{}", header)?;
                                 header_written = true;
                             }
-                            println!("ts:{}, rssi:{}", packet.esp_timestamp, packet.rssi);
+                            // println!("ts:{}, rssi:{}", packet.esp_timestamp, packet.rssi);
                             csv_utils::write_csv_line(&mut csv_out, &packet)?;
                             lines_written += 1;
                             if let Err(e) = log_csi_frame(&rec, frame_idx, &packet) {
-                                eprintln!("Rerun log error: {}", e);
+                                // eprintln!("Rerun log error: {}", e);
                             }
                             frame_idx += 1;
                         }
@@ -137,22 +137,22 @@ pub fn record_csi_to_file(
                 }
             }
             Ok(_) => {
-                println!("No data read");
+                // println!("No data read");
                 // No data read, continue
             }
             Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
                 // Timeout is expected, just continue
-                println!("TimeOut");
+                // println!("TimeOut");
                 continue;
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // Would block, sleep a bit and continue
-                println!("Wouldblock");
+                // println!("Wouldblock");
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
             Err(e) => {
-                eprintln!("Serial read error: {}", e);
+                // e!("Serial read error: {}", e);
                 break;
             }
         }
@@ -161,6 +161,9 @@ pub fn record_csi_to_file(
     csv_out.flush()?;
     // Flush the recording stream before dropping
     let _ = rec.flush_blocking();
-    eprintln!("Recording complete. Lines written: {}, Frames logged: {}", lines_written, frame_idx);
+    // eprintln!(
+    //     "Recording complete. Lines written: {}, Frames logged: {}",
+    //     lines_written, frame_idx
+    // );
     Ok(())
 }

@@ -94,7 +94,7 @@ impl CsiCliParser {
                     csi_values: vals,
                 });
             } else {
-                println!("CSI array received without complete metadata (timestamp/rssi).");
+                // println!("CSI array received without complete metadata (timestamp/rssi).");
                 return None;
             }
         }
