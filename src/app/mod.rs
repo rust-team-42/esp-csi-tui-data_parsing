@@ -13,7 +13,7 @@ use ratatui::{
     style::Color,
     DefaultTerminal, Frame,
 };
-use crate::esp_port;
+use crate::esp_port::{self, find_esp_port};
 use crate::parse_data;
 use crate::read_data;
 
@@ -47,6 +47,7 @@ pub struct App {
     plot_points: Vec<(f64, f64)>,
     //first_ts: Option<u64>,
     subcarrier: usize,
+    esp_port: Option<String>,
     plot_rx: Option<mpsc::Receiver<(f64, f64)>>,
 }
 
@@ -67,6 +68,7 @@ impl Default for App {
             worker_done_rx: None,
             plot_points: Vec::new(),
             subcarrier: 20,
+            esp_port: find_esp_port(),
             plot_rx: None,
         }
     }
@@ -82,6 +84,7 @@ impl App {
     pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         self.running = true;
         while self.running {
+            self.refresh_esp();
             terminal.draw(|frame| self.render(frame))?;
             self.handle_crossterm_events()?;
             self.check_worker();
@@ -101,7 +104,7 @@ impl App {
         let mut text = Text::default();
 
         // Port info
-        let port_line = match &self.detected_port {
+        let port_line = match &self.esp_port{
             Some(p) => format!("Serial port: {p}"),
             None => "Serial port: <none detected, will fail unless you choose manually>".to_string(),
         };
@@ -341,6 +344,25 @@ impl App {
                 self.status = format!("Failed to load {}: {}", path, e);
             }
         }
+    }
+
+    fn refresh_esp(&mut self) {
+        let old = self.esp_port.clone();
+        let new = find_esp_port();
+
+        if new != old {
+            self.esp_port = new.clone();
+            match(&old, &new) {
+                (None, Some(p)) => {
+                    self.status = format!("ESP connected on {p}");
+                }
+                (Some(_), None) => {
+                    self.status = "ESP disconnect".into();
+                }
+                _ => {}
+            }
+        }
+        self.esp_port = find_esp_port();
     }
 
     fn quit(&mut self) {
