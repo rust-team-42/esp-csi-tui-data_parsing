@@ -51,6 +51,7 @@ pub fn send_cli_command(
     port: &mut dyn SerialPort,
     cmd: &str,
 ) -> io::Result<()> {
+    eprint!("cmd: {}", cmd);
     port.write_all(cmd.as_bytes())?;
     port.write_all(b"\r\n")?;
     port.flush()?;

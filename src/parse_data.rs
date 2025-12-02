@@ -66,9 +66,10 @@ pub fn record_csi_to_file(
     csv_filename: &str,
     rrd_filename: &str,
     wifi_mode: WifiMode,
-    seconds: u64,
+    duration_secs: u64,
     subcarrier: usize,
     plot_tx: Option<mpsc::Sender<(f64, f64)>>,
+    heatmap_tx: Option<mpsc::Sender<Vec<Vec<u8>>>>, // Add this parameter
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize Rerun recording stream
     let rec = rerun::RecordingStreamBuilder::new("esp-csi-tui-rs").save(rrd_filename)?;
@@ -103,7 +104,12 @@ pub fn record_csi_to_file(
     let mut lines_written: u64 = 0;
     let mut parser = CsiCliParser::new();
 
-    while start.elapsed() < Duration::from_secs(seconds) {
+    // Add a buffer to collect CSI data for heatmap
+    let mut csi_buffer: Vec<Vec<u8>> = vec![];
+    let heatmap_update_interval = 100; // Send heatmap every N packets
+    let mut packet_counter = 0;
+
+    while start.elapsed() < Duration::from_secs(duration_secs) {
         match port.read(&mut read_buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
                 //println!("read_buffer: {}\n", read_buffer);
@@ -141,6 +147,36 @@ pub fn record_csi_to_file(
                                     let _ = tx.send((t, amplitudes[subcarrier] as f64));
                                 }
                             }
+
+                            // After parsing a packet and extracting CSI data:
+                            // Assuming you have access to the full CSI amplitude array for this packet
+                            // Convert CSI amplitudes to 0-100 range
+                            let mut row: Vec<u8> = vec![];
+                            for subcarrier_idx in 0..64 {
+                                // Assuming 64 subcarriers
+                                // Get amplitude for this subcarrier
+                                let amplitude = packet.get_amplitudes()[subcarrier_idx];
+                                // Normalize to 0-100 range
+                                let normalized = ((amplitude / 100.0) * 100.0).min(100.0) as u8;
+                                row.push(normalized);
+                            }
+
+                            // Add row to buffer
+                            csi_buffer.push(row);
+
+                            // Keep buffer size limited (e.g., last 50 packets)
+                            if csi_buffer.len() > 50 {
+                                csi_buffer.remove(0);
+                            }
+
+                            // Send heatmap data periodically
+                            packet_counter += 1;
+                            if packet_counter % heatmap_update_interval == 0 {
+                                if let Some(ref tx) = heatmap_tx {
+                                    let _ = tx.send(csi_buffer.clone());
+                                }
+                            }
+
                             frame_idx += 1;
                         }
                     }

@@ -112,18 +112,11 @@ enum Step {
 #[derive(Debug)]
 pub struct App {
     running: bool,
-    /// Is the application running?
     step: Step,
-    /// Current UI / recording step.
     detected_port: Option<String>,
-    /// Detected serial port (e.g. "/dev/ttyACM0").
     filename: String,
-    /// Filename the user types (e.g. "walk1").
     duration_input: String,
-    /// Duration in seconds (typed as text, e.g. "10").
     status: String,
-    /// Status message to show at bottom.
-    /// Channel to receive completion message from worker thread.
     wifi_mode: WifiMode,
     ssid: String,
     password: String,
@@ -132,17 +125,13 @@ pub struct App {
     is_sniffer_mode: bool,
     nav_selected: usize,
     nav_item_selected: usize,
-    //first_ts: Option<u64>,
     subcarrier: usize,
     esp_port: Option<String>,
     plot_rx: Option<mpsc::Receiver<(f64, f64)>>,
-    /// When recording started (used for auto-switching the UI after N seconds)
+    heatmap_rx: Option<mpsc::Receiver<Vec<Vec<u8>>>>, // Add this
     recording_start: Option<SystemTime>,
-    /// Whether we've already auto-switched the UI for this recording run
     auto_switched: bool,
-    /// If true, render the plot in full-screen mode
     full_screen_plot: bool,
-    /// Heatmap data for visualization
     heatmap_data: Heatmap,
 }
 
@@ -170,6 +159,7 @@ impl Default for App {
             password: String::new(),
             esp_port: esp_port::find_esp_port(),
             plot_rx: None,
+            heatmap_rx: None, // Add this
             is_sniffer_mode: true,
             nav_selected: 0,
             nav_item_selected: 0,
@@ -195,6 +185,7 @@ impl App {
             // Drain any incoming live-plot points before drawing so the chart
             // shows the freshest data.
             self.poll_plot_data();
+            self.poll_heatmap_data(); // Add this
             // Check whether we should auto-switch the UI into the full-screen
             // live-plot mode after a short delay while recording.
             self.check_auto_switch();
@@ -820,21 +811,23 @@ impl App {
             base_filename, base_filename, secs, port
         );
         self.step = Step::Recording;
-        // record the start time so we can auto-switch UI after a timeout
         self.recording_start = Some(SystemTime::now());
         self.auto_switched = false;
         self.full_screen_plot = false;
-        // Clear any existing plotted points so the chart is empty for the
-        // new recording run. Also reset any previous plot receiver to avoid
-        // mixing data from prior runs.
         self.plot_points.clear();
+        self.heatmap_data = Heatmap { values: vec![] }; // Clear heatmap
         self.plot_rx = None;
+        self.heatmap_rx = None; // Reset heatmap receiver
+        
         let (tx, rx) = mpsc::channel();
         self.worker_done_rx = Some(rx);
-        // Create a live-plot channel and keep the receiver so the UI can
-        // pull points as they arrive.
+        
         let (plot_tx, plot_rx) = mpsc::channel();
         self.plot_rx = Some(plot_rx);
+        
+        let (heatmap_tx, heatmap_rx) = mpsc::channel(); // Create heatmap channel
+        self.heatmap_rx = Some(heatmap_rx);
+        
         let wifi_mode = self.wifi_mode;
         let subcarrier = self.subcarrier;
         thread::spawn(move || {
@@ -846,6 +839,7 @@ impl App {
                 secs,
                 subcarrier,
                 Some(plot_tx),
+                Some(heatmap_tx), // Pass heatmap sender
             )
             .map_err(|e| e.to_string());
             let _ = tx.send(res);
@@ -909,6 +903,21 @@ impl App {
                         self.plot_rx = None;
                         break;
                     }
+                }
+            }
+        }
+    }
+
+    /// Poll heatmap data from the recording thread
+    fn poll_heatmap_data(&mut self) {
+        if let Some(rx) = &self.heatmap_rx {
+            match rx.try_recv() {
+                Ok(grid) => {
+                    self.heatmap_data = Heatmap { values: grid };
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.heatmap_rx = None;
                 }
             }
         }
