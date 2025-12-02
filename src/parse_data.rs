@@ -1,5 +1,6 @@
 use crate::csi_packet;
 use crate::csi_packet::CsiCliParser;
+use crate::wifi_mode::apply_wifi_config;
 use crate::{csv_utils, esp_port::send_cli_command, wifi_mode::WifiMode};
 use color_eyre::Result;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
@@ -66,6 +67,8 @@ pub fn record_csi_to_file(
     csv_filename: &str,
     rrd_filename: &str,
     wifi_mode: WifiMode,
+    ssid: String,
+    password: String,
     duration_secs: u64,
     subcarrier: usize,
     plot_tx: Option<mpsc::Sender<(f64, f64)>>,
@@ -89,9 +92,10 @@ pub fn record_csi_to_file(
     // Small delay to let the ESP initialize
     // Clear any pending data in the buffer
     port.clear(serialport::ClearBuffer::All)?;
-    send_cli_command(&mut *port, wifi_mode.to_cli_command())?;
+    //send_cli_command(&mut *port, wifi_mode.to_cli_command())?;
+    apply_wifi_config(&mut *port, wifi_mode, &ssid, &password)?;
     std::thread::sleep(Duration::from_millis(200));
-    send_cli_command(&mut *port, "start")?;
+    send_cli_command(&mut *port, &format!("start --duration={}", duration_secs))?;
     std::thread::sleep(Duration::from_millis(100));
     //port.write_all(b"start\r\n")?;
     //port.flush()?;

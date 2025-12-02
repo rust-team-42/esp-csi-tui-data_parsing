@@ -77,12 +77,10 @@ impl CsiCliParser {
                 match tok.parse::<i32>() {
                     Ok(v) => vals.push(v),
                     Err(e) => {
-                        // eprintln!("Failed to parse CSI value '{tok}': {e}");
                     }
                 }
             }
             if vals.len() != 128 {
-                // eprintln!("Warning: expected 128 CSI values, got {}", vals.len());
                 return None;
             }
             if let (Some(ts), Some(rssi)) = (self.current_timestamp, self.current_rssi) {
@@ -94,7 +92,6 @@ impl CsiCliParser {
                     csi_values: vals,
                 });
             } else {
-                // println!("CSI array received without complete metadata (timestamp/rssi).");
                 return None;
             }
         }
