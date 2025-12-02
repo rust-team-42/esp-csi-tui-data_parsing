@@ -235,6 +235,12 @@ impl App {
                 .fold((0.0f64, 0.0f64), |(mn, mx), (_, a)| {
                     (mn.min(*a), mx.max(*a))
                 });
+            let (_, a_max) = self
+                .plot_points
+                .iter()
+                .fold((0.0f64, 0.0f64), |(mn, mx), (_, a)| {
+                    (mn.min(*a as f64), mx.max(*a as f64))
+                });
             let dataset = Dataset::default()
                 .name(format!("Subcarrier {}", self.subcarrier))
                 .marker(ratatui::symbols::Marker::Braille)
@@ -407,11 +413,11 @@ impl App {
                 if self.filename.is_empty() {
                     self.status = "Filename cannot be empty.".into();
                 } else {
-                    // self.step = Step::ChooseAction;
-                    // self.status = "Press R to record new data, or O to open existing .csv file".into();
-                    // self.load_file_for_plot();
-                    self.step = Step::EnterDuration;
-                    self.status = "Now type duration in seconds and press Enter.".into();
+                    self.step = Step::ChooseAction;
+                    self.status = "Press R to record new data, or O to open existing .csv file".into();
+                    self.load_file_for_plot();
+                    // self.step = Step::EnterDuration;
+                    // self.status = "Now type duration in seconds and press Enter.".into();
                 }
             }
             _ => {}
@@ -450,25 +456,16 @@ impl App {
             self.step = Step::Finished;
             return;
         };
-
         let base_filename = self.filename.clone();
         let csv_filename = format!("{}.csv", base_filename);
         let rrd_filename = format!("{}.rrd", base_filename);
-        // let (done_tx, done_rx) = mpsc::channel::<Result<(), String>>();
-        // let (plot_tx, plot_rx) = mpsc::channel::<(f64, f64)>();
-        // self.worker_done_rx = Some(done_rx);
-        // self.plot_rx = Some(plot_rx);
-
         self.status = format!(
             "Recording to {}.csv and {}.rrd for {}s on port {}...",
             base_filename, base_filename, secs, port
         );
         self.step = Step::Recording;
-
         let (tx, rx) = mpsc::channel();
         self.worker_done_rx = Some(rx);
-
-        // Spawn worker thread that does the blocking I/O.
         thread::spawn(move || {
             let res = parse_data::record_csi_to_file(&port, &csv_filename, &rrd_filename, secs)
                 .map_err(|e| e.to_string());
@@ -502,18 +499,6 @@ impl App {
         }
     }
 
-    // fn poll_plot_data(&mut self) {
-    //     if let Some(rx) = &self.plot_rx {
-    //         while let Ok(point) = rx.try_recv() {
-    //             self.plot_points.push(point);
-    //             if self.plot_points.len() > 500 {
-    //                 let drop = self.plot_points.len() - 500;
-    //                 self.plot_points.drain(0..drop);
-    //             }
-    //         }
-    //     }
-    // }
-
     fn load_file_for_plot(&mut self) {
         let filename = self.filename.trim();
         if filename.is_empty() {
@@ -542,7 +527,6 @@ impl App {
         }
     }
 
-    /// Set running to false to quit the application.
     fn quit(&mut self) {
         self.running = false;
     }
