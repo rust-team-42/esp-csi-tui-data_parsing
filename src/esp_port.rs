@@ -1,6 +1,4 @@
-
-//use serialport::{SerialPortType};
-use serialport::{available_ports, SerialPortType, UsbPortInfo};
+use serialport::{available_ports, SerialPortType, UsbPortInfo, SerialPort};
 use std::io::{self, Write};
 
 pub fn find_esp_port() -> Option<String> {
@@ -48,12 +46,12 @@ pub fn find_esp_port() -> Option<String> {
     None
 }
 
-// pub fn send_cli_command(
-//     port: &mut dyn Serialport,
-//     cmd: &str,
-// ) -> io::Result<()> {
-//     port.write_all(cmd.as_bytes())?;
-//     port.write_all(b"\r\n")?;
-//     port.flush()?;
-//     Ok(())
-// }
+pub fn send_cli_command(
+    port: &mut dyn SerialPort,
+    cmd: &str,
+) -> io::Result<()> {
+    port.write_all(cmd.as_bytes())?;
+    port.write_all(b"\r\n")?;
+    port.flush()?;
+    Ok(())
+}

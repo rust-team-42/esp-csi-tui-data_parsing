@@ -7,9 +7,8 @@ use std::{
 };
 use color_eyre::Result;
 use serialport::{DataBits, FlowControl, Parity, StopBits};
-use crate::csv_utils;
+use crate::{csv_utils, esp_port::send_cli_command, wifi_mode::WifiMode};
 use crate::csi_packet;
-use crate::detect_motion;
 use crate::csi_packet::CsiCliParser;
 
 
@@ -66,7 +65,7 @@ pub fn record_csi_to_file(
     csv_filename: &str,
     rrd_filename: &str,
     seconds: u64,
-    // plot_rx: mpsc::Send<(f64, f64)>
+    wifi_mode: WifiMode,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize Rerun recording stream
     let rec = rerun::RecordingStreamBuilder::new("esp-csi-tui-rs")
@@ -87,6 +86,10 @@ pub fn record_csi_to_file(
     // Small delay to let the ESP initialize
     // Clear any pending data in the buffer
     port.clear(serialport::ClearBuffer::All)?;
+    send_cli_command(&mut *port, wifi_mode.to_cli_command())?;
+    std::thread::sleep(Duration::from_millis(200));
+    send_cli_command(&mut *port, "start")?;
+    std::thread::sleep(Duration::from_millis(100));
     port.write_all(b"start\r\n")?;
     port.flush()?;
     let mut csv_out = File::create(csv_filename)?;

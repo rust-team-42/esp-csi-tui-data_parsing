@@ -45,6 +45,7 @@ pub struct App {
     /// Channel to receive completion message from worker thread.
     worker_done_rx: Option<mpsc::Receiver<std::result::Result<(), String>>>,
     plot_points: Vec<(f64, f64)>,
+    is_sniffer_mode: bool,
     //first_ts: Option<u64>,
     subcarrier: usize,
     esp_port: Option<String>,
@@ -67,6 +68,7 @@ impl Default for App {
             status,
             worker_done_rx: None,
             plot_points: Vec::new(),
+            is_sniffer_mode: true,
             subcarrier: 20,
             esp_port: find_esp_port(),
             plot_rx: None,
