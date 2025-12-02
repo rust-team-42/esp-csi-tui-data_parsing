@@ -67,6 +67,8 @@ pub fn record_csi_to_file(
     rrd_filename: &str,
     wifi_mode: WifiMode,
     seconds: u64,
+    subcarrier: usize,
+    plot_tx: Option<mpsc::Sender<(f64, f64)>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize Rerun recording stream
     let rec = rerun::RecordingStreamBuilder::new("esp-csi-tui-rs").save(rrd_filename)?;
@@ -130,6 +132,14 @@ pub fn record_csi_to_file(
                             lines_written += 1;
                             if let Err(e) = log_csi_frame(&rec, frame_idx, &packet) {
                                 // eprintln!("Rerun log error: {}", e);
+                            }
+                            // Send live point for requested subcarrier (time in seconds, amplitude)
+                            if let Some(tx) = &plot_tx {
+                                let amplitudes = packet.get_amplitudes();
+                                if subcarrier < amplitudes.len() {
+                                    let t = start.elapsed().as_secs_f64();
+                                    let _ = tx.send((t, amplitudes[subcarrier] as f64));
+                                }
                             }
                             frame_idx += 1;
                         }

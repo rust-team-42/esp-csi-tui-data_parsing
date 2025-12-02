@@ -3,6 +3,7 @@ use crate::parse_data;
 use crate::read_data;
 use crate::wifi_mode::WifiConfig;
 use crate::wifi_mode::WifiMode;
+use chrono::{DateTime, Local};
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -14,7 +15,11 @@ use ratatui::{
     widgets::{Axis, Block, Chart, Dataset, GraphType, Paragraph},
 };
 use std::fs::{self};
-use std::{sync::mpsc, thread, time::Duration};
+use std::{
+    sync::mpsc,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Debug)]
 struct RecordingStats {
@@ -60,6 +65,12 @@ pub struct App {
     subcarrier: usize,
     esp_port: Option<String>,
     plot_rx: Option<mpsc::Receiver<(f64, f64)>>,
+    /// When recording started (used for auto-switching the UI after N seconds)
+    recording_start: Option<SystemTime>,
+    /// Whether we've already auto-switched the UI for this recording run
+    auto_switched: bool,
+    /// If true, render the plot in full-screen mode
+    full_screen_plot: bool,
 }
 
 impl Default for App {
@@ -89,6 +100,9 @@ impl Default for App {
             is_sniffer_mode: true,
             nav_selected: 0,
             nav_item_selected: 0,
+            recording_start: None,
+            auto_switched: false,
+            full_screen_plot: false,
         }
     }
 }
@@ -104,6 +118,12 @@ impl App {
         self.running = true;
         while self.running {
             self.refresh_esp();
+            // Drain any incoming live-plot points before drawing so the chart
+            // shows the freshest data.
+            self.poll_plot_data();
+            // Check whether we should auto-switch the UI into the full-screen
+            // live-plot mode after a short delay while recording.
+            self.check_auto_switch();
             terminal.draw(|frame| self.render(frame))?;
             self.handle_crossterm_events()?;
             self.check_worker();
@@ -114,6 +134,59 @@ impl App {
     /// Renders the user interface.
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        // If we've switched to a dedicated full-screen plot view, render
+        // only the chart to occupy the whole terminal area.
+        if self.full_screen_plot {
+            if !self.plot_points.is_empty() {
+                let (t_min, t_max) = self
+                    .plot_points
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), (t, _)| {
+                        (mn.min(*t), mx.max(*t))
+                    });
+                let (_, a_max) = self
+                    .plot_points
+                    .iter()
+                    .fold((0.0f64, 0.0f64), |(mn, mx), (_, a)| {
+                        (mn.min(*a), mx.max(*a))
+                    });
+                let dataset = Dataset::default()
+                    .name(format!("Subcarrier {}", self.subcarrier))
+                    .marker(ratatui::symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Color::Cyan)
+                    .data(&self.plot_points);
+                let last_label = self.format_last_label().unwrap_or_default();
+
+                let chart = Chart::new(vec![dataset])
+                    .block(Block::bordered().title(format!(
+                        "Live Amplitude{}",
+                        if last_label.is_empty() {
+                            "".to_string()
+                        } else {
+                            format!(" — {}", last_label)
+                        }
+                    )))
+                    .x_axis(
+                        Axis::default()
+                            .title("time (s)")
+                            .bounds([t_min, t_max.max(t_min + 0.1)]),
+                    )
+                    .y_axis(
+                        Axis::default()
+                            .title("amplitude")
+                            .bounds([0.0, a_max.max(1.0)]),
+                    );
+                frame.render_widget(chart, area);
+            } else {
+                frame.render_widget(
+                    Paragraph::new("Waiting for live data...")
+                        .block(Block::bordered().title("Live Amplitude")),
+                    area,
+                );
+            }
+            return;
+        }
         let layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints(vec![Constraint::Percentage(20), Constraint::Percentage(80)])
@@ -264,8 +337,13 @@ impl App {
                 .graph_type(GraphType::Line)
                 .style(Color::Cyan)
                 .data(&self.plot_points);
+            let last_label = self.format_last_label().unwrap_or_default();
             let chart = Chart::new(vec![dataset])
-                .block(Block::bordered().title("Amplitude over time"))
+                .block(Block::bordered().title(if last_label.is_empty() {
+                    "Amplitude over time".to_string()
+                } else {
+                    format!("Amplitude over time — {}", last_label)
+                }))
                 .x_axis(
                     Axis::default()
                         .title("time (s)")
@@ -647,9 +725,23 @@ impl App {
             base_filename, base_filename, secs, port
         );
         self.step = Step::Recording;
+        // record the start time so we can auto-switch UI after a timeout
+        self.recording_start = Some(SystemTime::now());
+        self.auto_switched = false;
+        self.full_screen_plot = false;
+        // Clear any existing plotted points so the chart is empty for the
+        // new recording run. Also reset any previous plot receiver to avoid
+        // mixing data from prior runs.
+        self.plot_points.clear();
+        self.plot_rx = None;
         let (tx, rx) = mpsc::channel();
         self.worker_done_rx = Some(rx);
+        // Create a live-plot channel and keep the receiver so the UI can
+        // pull points as they arrive.
+        let (plot_tx, plot_rx) = mpsc::channel();
+        self.plot_rx = Some(plot_rx);
         let wifi_mode = self.wifi_mode;
+        let subcarrier = self.subcarrier;
         thread::spawn(move || {
             let res = parse_data::record_csi_to_file(
                 &port,
@@ -657,10 +749,74 @@ impl App {
                 &rrd_filename,
                 wifi_mode,
                 secs,
+                subcarrier,
+                Some(plot_tx),
             )
             .map_err(|e| e.to_string());
             let _ = tx.send(res);
         });
+    }
+
+    /// If recording has been running for longer than the threshold, switch
+    /// the UI into a full-screen live-plot mode. This does not affect the
+    /// recording thread — it only changes rendering on the UI thread.
+    fn check_auto_switch(&mut self) {
+        if self.step == Step::Recording && !self.auto_switched {
+            if let Some(start) = self.recording_start {
+                if let Ok(elapsed) = SystemTime::now().duration_since(start) {
+                    if elapsed >= Duration::from_secs(10) {
+                        self.full_screen_plot = true;
+                        self.auto_switched = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn format_last_label(&self) -> Option<String> {
+        if let Some((t_last, a_last)) = self.plot_points.last() {
+            if let Some(start) = self.recording_start {
+                if let Ok(start_since_epoch) = start.duration_since(UNIX_EPOCH) {
+                    let ts_dur = start_since_epoch + Duration::from_secs_f64(*t_last);
+                    let ts_system = UNIX_EPOCH + ts_dur;
+                    let dt: DateTime<Local> = DateTime::from(ts_system);
+                    let ts_str = format!(
+                        "{}.{:03}",
+                        dt.format("%Y-%m-%d %H:%M:%S"),
+                        dt.timestamp_subsec_millis()
+                    );
+                    return Some(format!("last {} | amp {:.3}", ts_str, a_last));
+                }
+            }
+            return Some(format!("t {:.3}s | amp {:.3}", t_last, a_last));
+        }
+        None
+    }
+
+    /// Drain any pending plot points from the recording thread and append
+    /// them to the in-memory buffer used for the chart. This is designed to
+    /// be called each UI loop so incoming data appears live.
+    fn poll_plot_data(&mut self) {
+        if let Some(rx) = &self.plot_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(pt) => {
+                        self.plot_points.push(pt);
+                        // Keep buffer bounded to avoid unbounded memory growth.
+                        if self.plot_points.len() > 2000 {
+                            // remove oldest
+                            self.plot_points.remove(0);
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // Producer died — stop polling.
+                        self.plot_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Check if the worker thread has finished.
@@ -672,11 +828,18 @@ impl App {
                     self.step = Step::Finished;
                     // Try to load the recorded CSV into the plot area
                     self.load_file_for_plot();
+                    // Reset UI auto-switch state
+                    self.recording_start = None;
+                    self.auto_switched = false;
+                    self.full_screen_plot = false;
                     self.worker_done_rx = None;
                 }
                 Ok(Err(err)) => {
                     self.status = format!("Recording failed: {err}");
                     self.step = Step::Finished;
+                    self.recording_start = None;
+                    self.auto_switched = false;
+                    self.full_screen_plot = false;
                     self.worker_done_rx = None;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
