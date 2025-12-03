@@ -24,6 +24,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+const SAVE_DIR: &str = "saved_data";
+
 #[derive(Debug)]
 struct RecordingStats {
     lines_written: u64,
@@ -73,11 +75,10 @@ impl Default for App {
     fn default() -> Self {
         let detected_port = esp_port::find_esp_port();
         let status = match &detected_port {
-            Some(p) => {
-                format!("Detected port: {p}. Type filename (without extension) and press Enter.")
-            }
+            Some(p) => format!("Detected port: {p}. Type filename (without extension) and press Enter."),
             None => "No ESP port detected. Type filename anyway, then duration.".to_string(),
         };
+        let _ = fs::create_dir_all(SAVE_DIR);
         Self {
             running: false,
             step: Step::EnterFilename,
@@ -241,22 +242,9 @@ impl App {
 
         // --- Left nav: bottom (saved files list) ---
         let mut files_text = Text::default();
-        files_text.extend([Line::from("Files in repo root:")]);
-        let mut files_vec: Vec<String> = Vec::new();
-        if let Ok(entries) = fs::read_dir(".") {
-            for entry in entries.flatten() {
-                if let Ok(meta) = entry.metadata() {
-                    if meta.is_file() {
-                        if let Some(name) = entry.file_name().to_str() {
-                            if name.ends_with(".csv") || name.ends_with(".rrd") {
-                                files_vec.push(name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+        files_text.extend([Line::from("Files in saved_data:")]);
+        let mut files_vec = Self::list_saved_files();
+        files_vec.sort();
         if files_vec.is_empty() {
             files_text.extend([Line::from(Span::styled(
                 "<no saved .csv/.rrd files>".to_string(),
@@ -509,16 +497,7 @@ impl App {
                         self.nav_item_selected -= 1;
                     }
                 } else {
-                    // files list
-                    let files_len = fs::read_dir(".")
-                        .map(|e| {
-                            e.filter_map(|x| x.ok())
-                                .filter(|d| d.metadata().map(|m| m.is_file()).unwrap_or(false))
-                                .filter_map(|d| d.file_name().into_string().ok())
-                                .filter(|n| n.ends_with(".csv") || n.ends_with(".rrd"))
-                                .count()
-                        })
-                        .unwrap_or(0);
+                    let files_len = Self::list_saved_files().len();
                     if files_len > 0 && self.nav_item_selected > 0 {
                         self.nav_item_selected -= 1;
                     }
@@ -532,15 +511,7 @@ impl App {
                         self.nav_item_selected += 1;
                     }
                 } else {
-                    let files_len = fs::read_dir(".")
-                        .map(|e| {
-                            e.filter_map(|x| x.ok())
-                                .filter(|d| d.metadata().map(|m| m.is_file()).unwrap_or(false))
-                                .filter_map(|d| d.file_name().into_string().ok())
-                                .filter(|n| n.ends_with(".csv") || n.ends_with(".rrd"))
-                                .count()
-                        })
-                        .unwrap_or(0);
+                    let files_len = Self::list_saved_files().len();
                     if files_len > 0 && self.nav_item_selected + 1 < files_len {
                         self.nav_item_selected += 1;
                     }
@@ -561,21 +532,7 @@ impl App {
                         _ => {}
                     }
                 } else {
-                    // load selected file into filename and attempt to load
-                    let mut files_vec: Vec<String> = Vec::new();
-                    if let Ok(entries) = fs::read_dir(".") {
-                        for entry in entries.flatten() {
-                            if let Ok(meta) = entry.metadata() {
-                                if meta.is_file() {
-                                    if let Some(name) = entry.file_name().to_str() {
-                                        if name.ends_with(".csv") || name.ends_with(".rrd") {
-                                            files_vec.push(name.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let files_vec = Self::list_saved_files();
                     if !files_vec.is_empty() && self.nav_item_selected < files_vec.len() {
                         let selected = files_vec[self.nav_item_selected].clone();
                         // strip extension for filename state
@@ -725,12 +682,13 @@ impl App {
             self.step = Step::Finished;
             return;
         };
+        let _ = fs::create_dir_all(SAVE_DIR);
         let base_filename = self.filename.clone();
-        let csv_filename = format!("{}.csv", base_filename);
-        let rrd_filename = format!("{}.rrd", base_filename);
+        let csv_filename = format!("{}/{}.csv", SAVE_DIR, base_filename);
+        let rrd_filename = format!("{}/{}.rrd", SAVE_DIR, base_filename);
         self.status = format!(
-            "Recording to {}.csv and {}.rrd for {}s on port {}...",
-            base_filename, base_filename, secs, port
+            "Recording to {}/{}.csv and {}/{}.rrd for {}s on port {}...",
+            SAVE_DIR, base_filename, SAVE_DIR, base_filename, secs, port
         );
         self.step = Step::Recording;
         self.recording_start = Some(SystemTime::now());
@@ -890,7 +848,7 @@ impl App {
             self.status = "Filename cannot be empty.".into();
             return;
         }
-        let path = format!("{filename}.csv");
+        let path = format!("{}/{}.csv", SAVE_DIR, filename);
         match read_data::load_csv_amplitude_series(&path, self.subcarrier) {
             Ok(points) => {
                 if points.is_empty() {
@@ -950,5 +908,25 @@ impl App {
 
     fn quit(&mut self) {
         self.running = false;
+    }
+
+    fn list_saved_files() -> Vec<String> {
+        fs::read_dir(SAVE_DIR)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.metadata().map(|m| m.is_file()).unwrap_or(false))
+                    .filter_map(|entry| {
+                        entry.file_name().into_string().ok().and_then(|name| {
+                            if name.ends_with(".csv") || name.ends_with(".rrd") {
+                                Some(name)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
