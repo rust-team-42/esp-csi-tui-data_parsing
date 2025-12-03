@@ -1,7 +1,8 @@
 use crate::esp_port;
 use crate::parse_data;
 use crate::read_data;
-use crate::wifi_mode::WifiConfig;
+use crate::heatmap::Heatmap;
+//use crate::wifi_mode::WifiConfig;
 use crate::wifi_mode::WifiMode;
 use chrono::{DateTime, Local};
 use color_eyre::Result;
@@ -30,73 +31,7 @@ struct RecordingStats {
 }
 
 /// Heatmap widget that renders a 2D grid of values with color-coded cells.
-#[derive(Debug, Clone)]
-pub struct Heatmap {
-    pub values: Vec<Vec<u8>>, // 0–100 values
-}
 
-impl Widget for &Heatmap {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let rows = self.values.len();
-        if rows == 0 {
-            return;
-        }
-        let cols = self.values[0].len();
-
-        // Keep within terminal bounds
-        let height = rows.min(area.height as usize);
-        let width = cols.min(area.width as usize);
-
-        for y in 0..height {
-            for x in 0..width {
-                let value = self.values[y][x];
-
-                // Map value -> color (0–100 scale)
-                let color = match value {
-                    0..=2 => Color::Rgb((0), (0), (255)),
-                    3..=5 => Color::Rgb((0), (10), (245)),
-                    6..=8 => Color::Rgb((0), (25), (230)),
-                    9..=11 => Color::Rgb((0), (40), (215)),
-                    12..=14 => Color::Rgb((0), (60), (200)),
-                    15..=17 => Color::Rgb((0), (80), (185)),
-                    18..=20 => Color::Rgb((10), (95), (165)),
-                    21..=23 => Color::Rgb((25), (110), (150)),
-                    24..=26 => Color::Rgb((40), (125), (135)),
-                    27..=29 => Color::Rgb((60), (140), (120)),
-                    30..=32 => Color::Rgb((80), (155), (105)),
-                    33..=35 => Color::Rgb((100), (170), (90)),
-                    36..=38 => Color::Rgb((120), (185), (75)),
-                    39..=41 => Color::Rgb((140), (200), (60)),
-                    42..=44 => Color::Rgb((160), (215), (45)),
-                    45..=47 => Color::Rgb((180), (230), (30)),
-                    48..=50 => Color::Rgb((200), (245), (15)),
-                    51..=53 => Color::Rgb((220), (255), (0)),
-                    54..=56 => Color::Rgb((230), (220), (0)),
-                    57..=59 => Color::Rgb((240), (185), (0)),
-                    60..=62 => Color::Rgb((245), (150), (0)),
-                    63..=65 => Color::Rgb((255), (130), (0)),
-                    66..=68 => Color::Rgb((255), (110), (0)),
-                    69..=71 => Color::Rgb((255), (90), (0)),
-                    72..=74 => Color::Rgb((255), (70), (0)),
-                    75..=77 => Color::Rgb((255), (40), (0)),
-                    78..=80 => Color::Rgb((255), (20), (0)),
-                    81..=100 => Color::Rgb((255), (0), (0)),
-                    _ => Color::Red,
-                };
-
-                // Draw a block (two spaces to make it square-ish)
-                let symbol = "  ";
-
-                buf.set_string(
-                    area.x + x as u16,
-                    area.y + y as u16,
-                    symbol,
-                    Style::default().bg(color),
-                );
-            }
-        }
-    }
-}
 
 /// Which step of input / recording we are in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +57,6 @@ pub struct App {
     password: String,
     worker_done_rx: Option<mpsc::Receiver<std::result::Result<(), String>>>,
     plot_points: Vec<(f64, f64)>,
-    is_sniffer_mode: bool,
     nav_selected: usize,
     nav_item_selected: usize,
     subcarrier: usize,
@@ -160,7 +94,6 @@ impl Default for App {
             esp_port: esp_port::find_esp_port(),
             plot_rx: None,
             heatmap_rx: None, // Add this
-            is_sniffer_mode: true,
             nav_selected: 0,
             nav_item_selected: 0,
             recording_start: None,
@@ -182,8 +115,6 @@ impl App {
         self.running = true;
         while self.running {
             self.refresh_esp();
-            // Drain any incoming live-plot points before drawing so the chart
-            // shows the freshest data.
             self.poll_plot_data();
             self.poll_heatmap_data(); // Add this
             // Check whether we should auto-switch the UI into the full-screen
@@ -271,11 +202,11 @@ impl App {
         let controls = vec![
             format!(
                 "{} Sniffer",
-                if self.is_sniffer_mode { "[x]" } else { "[ ]" }
+                if matches!(self.wifi_mode, WifiMode::Sniffer) { "[x]" } else { "[ ]" }
             ),
             format!(
                 "{} Station",
-                if !self.is_sniffer_mode { "[x]" } else { "[ ]" }
+                if matches!(self.wifi_mode, WifiMode::Station) { "[x]" } else { "[ ]" }
             ),
             format!("SSID: {}", self.ssid),
             format!("Password: {}", "*".repeat(self.password.len())),
@@ -356,21 +287,12 @@ impl App {
         };
 
         frame.render_widget(Paragraph::new(files_text).block(files_block), nav_layout[1]);
-
-        // --- Body top: connection / status ---
         let mut status_text = Text::default();
         let port_line = match &self.detected_port {
             Some(p) => format!("Detected port: {p}"),
             None => "Detected port: <none>".to_string(),
         };
         status_text.extend([Line::from(port_line)]);
-        // status_text.extend([Line::from(format!("Status: {}", self.status))]);
-        // // Key instructions for interacting with the UI
-        // status_text.extend([Line::from("")]);
-        // status_text.extend([Line::from(Span::styled(
-        //     "Keys: Tab=Switch pane  ↑/↓=Navigate  Space=Toggle/Load  Enter=Confirm  Ctrl+S=Record  Esc/Ctrl+C=Quit",
-        //     Style::default().fg(Color::Gray),
-        // ))]);
         frame.render_widget(
             Paragraph::new(status_text).block(Block::bordered().title("Connection Status")),
             body_layout[0],
@@ -629,11 +551,11 @@ impl App {
                 if self.nav_selected == 0 {
                     match self.nav_item_selected {
                         0 => {
-                            self.is_sniffer_mode = true;
+                            //self.is_sniffer_mode = true;
                             self.wifi_mode = WifiMode::Sniffer;
                         }
                         1 => {
-                            self.is_sniffer_mode = false;
+                            //self.is_sniffer_mode = false;
                             self.wifi_mode = WifiMode::Station;
                         }
                         _ => {}
@@ -829,6 +751,8 @@ impl App {
         self.heatmap_rx = Some(heatmap_rx);
         
         let wifi_mode = self.wifi_mode;
+        let ssid = self.ssid.clone();
+        let password = self.password.clone();
         let subcarrier = self.subcarrier;
         thread::spawn(move || {
             let res = parse_data::record_csi_to_file(
@@ -836,6 +760,8 @@ impl App {
                 &csv_filename,
                 &rrd_filename,
                 wifi_mode,
+                ssid,
+                password,
                 secs,
                 subcarrier,
                 Some(plot_tx),
@@ -990,23 +916,15 @@ impl App {
 
     /// Load heatmap data from a CSV file. Expects a grid of 0–100 values.
     fn load_heatmap_data(&mut self, path: &str) {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            let mut grid = vec![];
-            for line in content.lines() {
-                let mut row = vec![];
-                for cell in line.split(',') {
-                    if let Ok(num) = cell.trim().parse::<u8>() {
-                        row.push(num);
-                    } else {
-                        row.push(0);
-                    }
-                }
-                if !row.is_empty() {
-                    grid.push(row);
-                }
+        match read_data::load_csv_heatmap(path) {
+            Ok(values) if !values.is_empty() => {
+                self.heatmap_data = Heatmap { values };
             }
-            if !grid.is_empty() {
-                self.heatmap_data = Heatmap { values: grid };
+            Ok(_) => {
+
+            }
+            Err(e) => {
+                self.status = format!("Failed to load heatmap from {}: {}", path, e)
             }
         }
     }
