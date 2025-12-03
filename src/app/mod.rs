@@ -276,7 +276,7 @@ impl App {
 
         frame.render_widget(Paragraph::new(files_text).block(files_block), nav_layout[1]);
         let mut status_text = Text::default();
-        let port_line = match &self.detected_port {
+        let port_line = match &self.esp_port {
             Some(p) => format!("Detected port: {p}"),
             None => "Detected port: <none>".to_string(),
         };
@@ -677,7 +677,7 @@ impl App {
     }
 
     fn start_recording(&mut self, secs: u64) {
-        let Some(port) = self.detected_port.clone() else {
+        let Some(port) = self.esp_port.clone() else {
             self.status = "No serial port detected; cannot start recording.".into();
             self.step = Step::Finished;
             return;

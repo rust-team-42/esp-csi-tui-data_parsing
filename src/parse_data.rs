@@ -207,13 +207,14 @@ pub fn record_csi_to_file(
             }
         }
     }
-    // Flush CSV file
     csv_out.flush()?;
-    // Flush the recording stream before dropping
     let _ = rec.flush_blocking();
     // eprintln!(
     //     "Recording complete. Lines written: {}, Frames logged: {}",
     //     lines_written, frame_idx
     // );
+    // port.write_all(&[0x12])?;
+    // port.flush()?;
+    // std::thread::sleep(Duration::from_millis(100));
     Ok(())
 }
